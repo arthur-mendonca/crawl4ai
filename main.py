@@ -3,17 +3,90 @@ from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.async_configs import VirtualScrollConfig
+from crawl4ai.extraction_strategy import LLMExtractionStrategy
 import re
+from collections import Counter
 
-app = FastAPI(title="Crawl4AI Optimized - Anti-Banner v2")
+app = FastAPI(title="Crawl4AI v3 - Text Density Extraction")
 
 class CrawlRequest(BaseModel):
     url: str
+    min_words: int = 100  # Mínimo de palavras para considerar válido
+
+def extract_article_by_density(markdown: str, title: str = "") -> str:
+    """
+    Extrai o artigo procurando pelos blocos com maior densidade de texto
+    """
+    # Remove múltiplas quebras de linha
+    markdown = re.sub(r'\n{3,}', '\n\n', markdown)
+    
+    # Divide em blocos por dupla quebra de linha
+    blocks = [b.strip() for b in markdown.split('\n\n') if b.strip()]
+    
+    # Analisa cada bloco
+    scored_blocks = []
+    for block in blocks:
+        words = block.split()
+        word_count = len(words)
+        
+        # Skip blocos muito pequenos
+        if word_count < 10:
+            continue
+        
+        # Calcula score baseado em características de artigo
+        score = 0
+        
+        # +1 por palavra (até 500 palavras)
+        score += min(word_count, 500)
+        
+        # -50 se tiver muito link (navegação)
+        if block.count('[') > 5 or block.count('http') > 3:
+            score -= 50
+        
+        # -30 se for lista de links curtos
+        lines = block.split('\n')
+        if len(lines) > 5 and sum(len(l) < 50 for l in lines) > len(lines) * 0.7:
+            score -= 30
+        
+        # -100 se tiver palavras-chave de banner
+        banner_words = ['privacy', 'cookie', 'consent', 'partners', 'vendors', 
+                       'preferences', 'advertising', 'manage', 'accept', 'reject']
+        if sum(1 for w in banner_words if w in block.lower()) >= 3:
+            score -= 100
+        
+        # +20 se tiver pontuação de artigo (. ! ?)
+        score += min(block.count('.') + block.count('!') + block.count('?'), 20)
+        
+        # +30 se tiver parágrafos completos (termina com ponto)
+        if block.strip().endswith('.'):
+            score += 30
+        
+        scored_blocks.append((score, block, word_count))
+    
+    # Ordena por score
+    scored_blocks.sort(reverse=True, key=lambda x: x[0])
+    
+    # Pega os top blocos até atingir bom tamanho
+    result_blocks = []
+    total_words = 0
+    
+    for score, block, word_count in scored_blocks:
+        if score > 0 and total_words < 2000:  # Até 2000 palavras
+            result_blocks.append(block)
+            total_words += word_count
+    
+    # Monta resultado
+    result = '\n\n'.join(result_blocks)
+    
+    # Adiciona título no topo se não tiver
+    if title and not result.startswith('#'):
+        result = f"# {title}\n\n{result}"
+    
+    return result
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
     
-    # 1. Browser Config com stealth máximo
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
@@ -26,228 +99,64 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 2. Scroll Config mais agressivo
-    scroll_config = VirtualScrollConfig(
-        container_selector="body",
-        scroll_count=5,  # Mais scrolls para lazy load
-        scroll_by="page_height",
-        wait_after_scroll=1.5
-    )
-
-    # 3. JavaScript Handler APRIMORADO
+    # JS MINIMALISTA - só remove overlays e clica em consentimento
     js_handler = """
     (async () => {
-        console.log("🚀 INICIANDO PROTOCOLO ANTI-BANNER v2");
         const sleep = ms => new Promise(r => setTimeout(r, ms));
+        await sleep(2000);
         
-        // ===== FASE 1: Espera Adicional para Conteúdo Dinâmico =====
-        await sleep(3000); // Espera 3s para conteúdo carregar
-        
-        // ===== FASE 2: Remoção Agressiva de Overlays =====
-        const overlaySelectors = [
-            '.modal', '.popup', '.overlay', '.consent', '.cookie',
-            '[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]',
-            '[id*="consent"]', '[class*="privacy"]', '[id*="privacy"]',
-            '.ms-consent-banner', '#ms-consent-banner', 
-            '[class*="gdpr"]', '[aria-modal="true"]',
-            '.privacy-modal', '.cookie-banner', '.consent-banner',
-            // MSN específico
-            '#consent-prompt-overlay', '.consent-prompt'
-        ];
-        
-        overlaySelectors.forEach(sel => {
-            document.querySelectorAll(sel).forEach(el => {
-                console.log(`🗑️ Removendo overlay: ${sel}`);
-                el.remove();
-            });
+        // Remove overlays
+        ['.modal', '.overlay', '[aria-modal="true"]', '[class*="consent"]', 
+         '[class*="cookie"]', '[class*="privacy"]'].forEach(sel => {
+            document.querySelectorAll(sel).forEach(el => el.remove());
         });
         
-        // Remove elementos com position:fixed que bloqueiam tela
-        document.querySelectorAll('*').forEach(el => {
-            const style = window.getComputedStyle(el);
-            if (style.position === 'fixed' && parseInt(style.zIndex) > 1000) {
-                console.log('🗑️ Removendo elemento fixed de alto z-index');
-                el.remove();
-            }
-        });
-        
-        // ===== FASE 3: Clique em Botões de Consentimento =====
-        const btnKeywords = [
-            'accept', 'agree', 'consent', 'allow', 'continue',
-            'aceitar', 'concordo', 'permitir', 'continuar',
-            'ok', 'yes', 'sim', 'entendi', 'i accept'
-        ];
-        
-        const buttons = Array.from(document.querySelectorAll(
-            'button, a[role="button"], div[role="button"], [class*="button"]'
-        ));
-        
-        for (const btn of buttons) {
-            const text = (btn.innerText || btn.textContent || '').toLowerCase().trim();
-            const hasKeyword = btnKeywords.some(kw => text.includes(kw));
-            
-            if (hasKeyword && text.length < 60) {
-                console.log(`✅ Clicando botão: "${text}"`);
-                try {
-                    btn.click();
-                    await sleep(2500);
-                    break; // Clica apenas no primeiro encontrado
-                } catch(e) {
-                    console.log('❌ Erro ao clicar:', e);
-                }
-            }
+        // Clica em aceitar se existir
+        const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+        const acceptBtn = btns.find(b => 
+            /accept|agree|ok|continue/i.test(b.innerText) && b.innerText.length < 50
+        );
+        if (acceptBtn) {
+            acceptBtn.click();
+            await sleep(2000);
         }
         
-        // ===== FASE 4: Isolamento Cirúrgico do Artigo =====
-        await sleep(1500);
-        
-        // Primeiro tenta encontrar o conteúdo por texto longo
-        let article = null;
-        
-        // Estratégia 1: Seletores específicos
-        const articleSelectors = [
-            'article',
-            '[role="main"]',
-            'main',
-            '.article-content',
-            '.story-body',
-            '.post-content',
-            '#article',
-            '#main-content',
-            '[itemtype*="Article"]',
-            '.news-article',
-            // MSN específico
-            '.article-body',
-            '[data-t="article"]',
-            '.content',
-            '#content'
-        ];
-        
-        for (const sel of articleSelectors) {
-            article = document.querySelector(sel);
-            if (article && article.innerText.length > 300) {
-                console.log(`📰 Artigo encontrado com seletor: ${sel} (${article.innerText.length} chars)`);
-                break;
-            }
-            article = null; // Reset se não tiver conteúdo suficiente
-        }
-        
-        // Estratégia 2: Se não encontrou, procura pela div com mais texto
-        if (!article) {
-            console.log('📰 Buscando elemento com mais texto...');
-            const allDivs = Array.from(document.querySelectorAll('div, section'));
-            
-            let maxLength = 0;
-            let bestDiv = null;
-            
-            allDivs.forEach(div => {
-                const textLength = div.innerText.length;
-                // Ignora elementos muito pequenos ou que são containers do body inteiro
-                if (textLength > maxLength && textLength < document.body.innerText.length * 0.9) {
-                    maxLength = textLength;
-                    bestDiv = div;
-                }
-            });
-            
-            if (bestDiv && maxLength > 500) {
-                article = bestDiv;
-                console.log(`📰 Melhor elemento encontrado com ${maxLength} caracteres`);
-            }
-        }
-        
-        if (article) {
-            // Clone o artigo
-            const content = article.cloneNode(true);
-            
-            // Remove elementos indesejados DENTRO do artigo
-            const unwantedInside = content.querySelectorAll(
-                'script, style, iframe, [class*="ad"], [id*="ad"], ' +
-                '[class*="promo"], [class*="related"], [class*="comment"], ' +
-                'nav, aside, header, footer'
-            );
-            unwantedInside.forEach(el => el.remove());
-            
-            // Pega o título da página
-            const title = document.title;
-            
-            // Limpa TUDO do body
-            document.body.innerHTML = '';
-            
-            // Adiciona título se disponível
-            if (title && !content.querySelector('h1')) {
-                const h1 = document.createElement('h1');
-                h1.textContent = title;
-                document.body.appendChild(h1);
-            }
-            
-            // Insere o artigo limpo
-            document.body.appendChild(content);
-            
-            console.log(`✅ DOM isolado com sucesso! Conteúdo final: ${document.body.innerText.length} chars`);
-        } else {
-            console.log('⚠️ Artigo não encontrado. Tentando limpeza genérica...');
-            
-            // Se não encontrou artigo, remove elementos comuns de navegação
-            const genericUnwanted = [
-                'header', 'footer', 'nav', 'aside', 
-                '[role="navigation"]', '[role="banner"]',
-                '[role="complementary"]', '.sidebar', '.menu',
-                '[class*="ad"]', '[id*="ad"]'
-            ];
-            
-            genericUnwanted.forEach(sel => {
-                document.querySelectorAll(sel).forEach(el => el.remove());
-            });
-        }
-        
-        // ===== FASE 5: Scroll Completo para Lazy Load =====
+        // Scroll para carregar lazy content
         window.scrollTo(0, document.body.scrollHeight);
-        await sleep(1500);
+        await sleep(1000);
         window.scrollTo(0, 0);
-        await sleep(500);
-        
-        console.log(`🏁 PROTOCOLO CONCLUÍDO - Texto final: ${document.body.innerText.length} chars`);
     })();
     """
 
-    # 4. Markdown Generator otimizado
     md_generator = DefaultMarkdownGenerator(
         options={
-            "ignore_links": False,  # Mantém links para referência
+            "ignore_links": False,
             "ignore_images": True,
             "body_width": 0,
-            "citations": False,
-            "escape_html": True
+            "citations": False
         }
     )
 
-    # 5. Run Config OTIMIZADO
+    scroll_config = VirtualScrollConfig(
+        container_selector="body",
+        scroll_count=3,
+        scroll_by="page_height",
+        wait_after_scroll=1.0
+    )
+
     config = CrawlerRunConfig(
         markdown_generator=md_generator,
         cache_mode=CacheMode.BYPASS,
-        
-        # Stealth mode COMPLETO
         magic=True,
         simulate_user=True,
         override_navigator=True,
-        
         js_code=js_handler,
         virtual_scroll_config=scroll_config,
-        
-        # Espera genérica - só garante que a página carregou
         wait_for="js:() => document.readyState === 'complete'",
-        page_timeout=60000,  # 60s timeout
-        delay_before_return_html=5.0,  # Mais tempo para JS rodar completamente
-        
-        # Exclusões extras
+        page_timeout=45000,  # 45s (reduzido para evitar timeout)
+        delay_before_return_html=3.0,
         excluded_tags=['script', 'style', 'iframe', 'noscript'],
-        excluded_selector=", ".join([
-            "#cookie-banner",
-            ".ms-consent-banner", 
-            ".privacy-modal",
-            "[id*='consent']",
-            "[class*='gdpr']"
-        ])
+        excluded_selector="#cookie-banner, .ms-consent-banner, .privacy-modal"
     )
 
     try:
@@ -261,88 +170,105 @@ async def crawl_url(request: CrawlRequest):
                 )
 
             raw_md = result.markdown.raw_markdown
-
-            # ===== FASE 5: Pós-Processamento Python =====
             
-            # Lista de frases-chave de banners (expandida)
-            banner_phrases = [
-                "Microsoft Cares About Your Privacy",
-                "A Microsoft Preocupa-se Com a Sua Privacidade",
-                "We and our partners process data",
-                "Number of Partners (vendors)",
-                "I Accept Reject All Manage Preferences",
-                "About Your Privacy",
-                "Personalised advertising and content",
-                "Use precise geolocation data",
-                "Store and/or access information on a device",
-                "List of Partners",
-                "Privacy Statement",
-                "Declaração de Privacidade",
-                "Manage Preferences",
-                "Gerenciar preferências"
-            ]
+            # Extrai título da página
+            title = ""
+            if result.metadata and 'title' in result.metadata:
+                title = result.metadata['title']
             
-            # Detecta se é principalmente banner
-            banner_ratio = sum(1 for phrase in banner_phrases if phrase in raw_md)
-            is_mostly_banner = banner_ratio >= 3  # Se encontrou 3+ frases
+            print(f"\n{'='*60}")
+            print(f"URL: {request.url}")
+            print(f"Markdown bruto: {len(raw_md)} chars")
+            print(f"HTML: {len(result.html) if result.html else 0} chars")
+            print(f"Título: {title}")
             
-            if is_mostly_banner:
-                print(f"⚠️ BANNER DETECTADO ({banner_ratio} frases encontradas)")
+            # ===== EXTRAÇÃO POR DENSIDADE DE TEXTO =====
+            cleaned_md = extract_article_by_density(raw_md, title)
+            
+            # Validação de qualidade
+            word_count = len(cleaned_md.split())
+            
+            # Se ainda muito pequeno, tenta fallback: pega parágrafos >100 chars
+            if word_count < request.min_words:
+                print("⚠️ Tentando fallback: extração de parágrafos longos...")
+                paragraphs = re.findall(r'([^\n]{100,})', raw_md)
                 
-                # Tenta encontrar separador
-                for separator in banner_phrases[-4:]:  # Usa últimos 4 como separadores
-                    if separator in raw_md:
-                        parts = raw_md.split(separator, 1)
-                        if len(parts) > 1 and len(parts[-1]) > 300:
-                            raw_md = parts[-1]
-                            print(f"✂️ Cortado após '{separator}'")
-                            break
+                # Filtra parágrafos de banner
+                good_paragraphs = [
+                    p for p in paragraphs 
+                    if not any(kw in p.lower() for kw in 
+                              ['cookie', 'privacy', 'consent', 'vendor', 'preference'])
+                ]
                 
-                # Se ainda pequeno, tenta regex para pegar parágrafos longos
-                if len(raw_md) < 500:
-                    paragraphs = re.findall(r'\n\n(.{200,}?)\n\n', raw_md)
-                    if paragraphs:
-                        raw_md = '\n\n'.join(paragraphs)
-                        print("✂️ Extraído via regex de parágrafos")
+                if good_paragraphs:
+                    cleaned_md = '\n\n'.join(good_paragraphs[:10])  # Top 10
+                    if title:
+                        cleaned_md = f"# {title}\n\n{cleaned_md}"
+                    word_count = len(cleaned_md.split())
             
-            # Remove linhas muito curtas (provavelmente menu/navegação)
-            lines = raw_md.split('\n')
-            cleaned_lines = [
-                line for line in lines 
-                if len(line.strip()) > 15 or line.strip().startswith('#')
-            ]
-            raw_md = '\n'.join(cleaned_lines)
-            
-            # Limpa espaços excessivos
-            raw_md = re.sub(r'\n{3,}', '\n\n', raw_md).strip()
-            
-            # ===== FASE 6: Validação de Qualidade =====
-            word_count = len(raw_md.split())
+            print(f"Markdown limpo: {len(cleaned_md)} chars, {word_count} palavras")
+            print(f"{'='*60}\n")
             
             quality_check = {
-                "has_content": len(raw_md) > 200,
+                "has_content": len(cleaned_md) > 200,
                 "word_count": word_count,
-                "likely_article": word_count > 100,
-                "banner_detected": is_mostly_banner
+                "likely_article": word_count >= request.min_words,
+                "extraction_method": "density" if word_count >= request.min_words else "fallback"
             }
             
             return {
                 "success": True,
                 "url": request.url,
-                "content_length": len(raw_md),
+                "title": title,
+                "content_length": len(cleaned_md),
                 "word_count": word_count,
                 "quality_check": quality_check,
-                "markdown": raw_md,
+                "markdown": cleaned_md,
+                "raw_markdown_length": len(raw_md),
                 "raw_html_length": len(result.html) if result.html else 0
             }
             
     except Exception as e:
-        print(f"❌ ERRO CRÍTICO: {e}")
+        print(f"❌ ERRO: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "crawl4ai-optimized"}
+    return {"status": "healthy", "service": "crawl4ai-v3"}
+
+@app.post("/crawl/debug")
+async def crawl_debug(request: CrawlRequest):
+    """
+    Endpoint de debug que retorna o markdown bruto SEM processamento
+    """
+    browser_config = BrowserConfig(
+        headless=True,
+        verbose=False,
+        user_agent_mode="random",
+        viewport_width=1920,
+        viewport_height=1080
+    )
+
+    config = CrawlerRunConfig(
+        markdown_generator=DefaultMarkdownGenerator(),
+        cache_mode=CacheMode.BYPASS,
+        wait_for="js:() => document.readyState === 'complete'",
+        page_timeout=30000,
+        delay_before_return_html=2.0
+    )
+
+    try:
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            result = await crawler.arun(url=request.url, config=config)
+            
+            return {
+                "success": result.success,
+                "url": request.url,
+                "raw_markdown": result.markdown.raw_markdown[:5000],  # Primeiros 5000 chars
+                "full_length": len(result.markdown.raw_markdown)
+            }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
