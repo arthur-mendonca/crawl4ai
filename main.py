@@ -17,8 +17,14 @@ class CrawlRequest(BaseModel):
 
 def extract_msn_article_id(url: str) -> str | None:
     """Extrai o ID do artigo de URLs do MSN (ex: AA1UiYJv)"""
-    match = re.search(r'/ar-([A-Z0-9]+)', url)
-    return match.group(1) if match else None
+    # Padrão: /ar-AA1UiYJv ou /ar-AA1UiYJv?parametros
+    match = re.search(r'/ar-([A-Za-z0-9]+)', url)
+    if match:
+        article_id = match.group(1)
+        # Remove query params se estiverem grudados
+        article_id = article_id.split('?')[0]
+        return article_id
+    return None
 
 async def fetch_msn_api(article_id: str) -> dict | None:
     """Busca conteúdo direto da API do MSN"""
