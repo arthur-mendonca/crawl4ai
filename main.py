@@ -11,15 +11,15 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador "Stealth" Refinada
+    # 1. Configuração do Navegador "Stealth" (SIMPLIFICADA)
+    # Removemos 'args' e 'locale' para evitar erros de inicialização.
+    # Confiamos nos Headers e no override_navigator para definir o idioma.
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
         user_agent_mode="random",
         viewport_width=1920,
         viewport_height=1080,
-        # CORREÇÃO: Passando o idioma via argumentos do Chrome
-        args=["--lang=pt-BR"],
         headers={
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
@@ -66,6 +66,7 @@ async def crawl_url(request: CrawlRequest):
         markdown_generator=md_generator,
         cache_mode=CacheMode.BYPASS,
         
+        # Otimizações para lidar com pop-ups e detecção
         magic=True, 
         simulate_user=True,
         override_navigator=True, 
@@ -73,7 +74,7 @@ async def crawl_url(request: CrawlRequest):
         js_code=js_handler,
         virtual_scroll_config=scroll_config,
 
-        # Espera pelo artigo real
+        # Espera pelo artigo real (O Pulo do Gato)
         wait_for="css:article, [role='main'], .article-content, #main-content",
         
         delay_before_return_html=3.0,
