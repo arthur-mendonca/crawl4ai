@@ -10,37 +10,63 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador (BrowserConfig)
-    # Isso é crucial para sites protegidos. O 'user_agent_mode="random"' e 
-    # headers específicos ajudam a evitar que o MSN detecte que é um bot.
+    # 1. Configuração do Navegador "Stealth"
     browser_config = BrowserConfig(
-        headless=True,  # Use False se quiser ver o navegador abrindo para debug
+        headless=True,
         verbose=True,
-        user_agent_mode="random", # Alterna entre user agents reais
+        user_agent_mode="random",
+        # Viewport maior ajuda a carregar versão desktop completa
+        viewport_width=1920,
+        viewport_height=1080,
         headers={
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
         }
     )
 
-    # 2. Script para lidar com Cookies/Popups
-    # Este script roda no navegador antes da raspagem. Ele tenta clicar 
-    # em botões comuns de "Aceitar Cookies".
-    js_click_consent = """
+    # 2. Script JavaScript Refinado para o MSN
+    # Tenta clicar em "Aceitar", mas se falhar, REMOVE o modal à força.
+    js_handler = """
     (async () => {
+        console.log("Iniciando script de limpeza...");
+        
+        // Função auxiliar para esperar
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+        // 1. Tentar clicar em botões de consentimento (GDPR/Cookies)
         const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
         const acceptBtn = buttons.find(btn => 
-            btn.innerText.toLowerCase().includes('aceito') || 
-            btn.innerText.toLowerCase().includes('concordo') || 
-            btn.innerText.toLowerCase().includes('accept') ||
-            btn.innerText.toLowerCase().includes('continuar')
+            btn.innerText && (
+                btn.innerText.match(/aceit(o|ar)/i) || 
+                btn.innerText.match(/concordo/i) || 
+                btn.innerText.match(/consent/i) ||
+                btn.innerText.match(/continuar/i)
+            )
         );
+        
         if (acceptBtn) {
-            console.log("Botão de consentimento encontrado. Clicando...");
+            console.log("Botão de aceitar encontrado. Clicando...");
             acceptBtn.click();
-            // Espera um pouco para o modal sumir e o conteúdo carregar
-            await new Promise(r => setTimeout(r, 2000));
+            await sleep(2000);
         }
+
+        // 2. Tática de "Força Bruta": Remover modais que cobrem a tela
+        // O MSN costuma ter classes como 'peregrine-auth-modal' ou similar
+        const overlays = document.querySelectorAll('[class*="modal"], [class*="consent"], [class*="overlay"], [class*="banner"]');
+        overlays.forEach(el => {
+            // Só remove se estiver cobrindo a tela e tiver z-index alto
+            const style = window.getComputedStyle(el);
+            if (style.position === 'fixed' || style.position === 'absolute') {
+                if (parseInt(style.zIndex) > 100) {
+                    console.log("Removendo overlay bloqueador:", el);
+                    el.remove();
+                }
+            }
+        });
+
+        // 3. Rolar a página para forçar o Lazy Loading do texto
+        window.scrollTo(0, document.body.scrollHeight / 2);
+        await sleep(1000);
+        window.scrollTo(0, 0);
     })();
     """
 
@@ -54,49 +80,44 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 4. Configuração da Execução (CrawlerRunConfig)
+    # 4. Configuração de Execução
     config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        # Força o crawler a baixar a página de novo, ignorando cache anterior com erro
-        cache_mode=CacheMode.BYPASS, 
+        cache_mode=CacheMode.BYPASS,
+        js_code=js_handler,
         
-        # Executa nosso script de fechar popups
-        js_code=js_click_consent,
+        # O PULO DO GATO: Esperar até que exista bastante texto na página
+        # Isso impede que o crawler retorne antes da notícia carregar.
+        wait_for="js:() => document.body.innerText.length > 500",
         
-        # O PULO DO GATO: O crawler só vai considerar a página "pronta" 
-        # quando encontrar a tag <article> ou um <h1>. 
-        # Isso evita raspar antes do redirect ou carregamento do JS.
-        wait_for="article, h1, .article-content",
+        # Se o wait_for acima falhar (timeout), tenta pelo menos esperar o article
+        # wait_for="article", 
         
-        excluded_tags=[
-            "nav", "footer", "header", "aside", 
-            "script", "style", "form", "noscript", 
-            "svg", "canvas", "button", "input"
-        ],
-        excluded_selector=".social-share, .sidebar, .menu, .nav-menu, .ads, #comments, .cookie-banner, .gdpr-banner"
+        # Dá um tempo extra após o processamento JS para o DOM estabilizar
+        delay_before_return_html=3.0,
+
+        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "svg", "button"],
+        excluded_selector=".social-share, .sidebar, .ad-container, .related-content"
     )
 
     try:
-        # Passamos o browser_config aqui na inicialização
         async with AsyncWebCrawler(config=browser_config) as crawler:
             result = await crawler.arun(url=request.url, config=config)
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
-            # Verifica se o conteúdo é muito curto (sinal de bloqueio persistente)
-            if len(result.markdown.raw_markdown) < 200:
-                 # Opcional: Tentar logar ou retornar aviso específico
-                 pass
-
-            final_content = result.markdown.markdown_with_citations
+            # Validação final: Se o texto for muito curto, provavelmente falhou
+            content_length = len(result.markdown.raw_markdown)
+            if content_length < 300:
+                print(f"ALERTA: Conteúdo muito curto ({content_length} chars). HTML dump: {result.html[:500]}")
+                # Aqui você poderia tentar uma estratégia de fallback se quisesse
 
             return {
                 "success": True,
                 "url": request.url,
-                "markdown": final_content,
-                # Útil para debug: retorna o título da página para ver se pegou a notícia
-                "metadata": result.metadata 
+                "content_length": content_length,
+                "markdown": result.markdown.markdown_with_citations
             }
             
     except Exception as e:
