@@ -11,18 +11,20 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configura o gerador para ignorar links/imagens e aplicar o filtro de limpeza
+    # 1. Configuração balanceada do gerador
     md_generator = DefaultMarkdownGenerator(
-        # O PruningContentFilter remove o "lixo" (menus, rodapés) baseado na densidade de texto
-        content_filter=PruningContentFilter(threshold=0.45, min_word_threshold=50),
+        content_filter=PruningContentFilter(
+            threshold=0.3,           # Reduzido de 0.45 para 0.3 para manter mais texto
+            min_word_threshold=20,    # Reduzido de 50 para 20 para não descartar parágrafos curtos
+            threshold_type="dynamic"  # Ajusta o limite automaticamente com base nos dados da página
+        ),
         options={
-            "ignore_links": True,   # Remove links: transforma [texto](url) em apenas texto
-            "ignore_images": True,  # Remove todas as imagens
+            "ignore_links": True,   # Isso garante que mesmo no 'raw_markdown' não haverá links
+            "ignore_images": True,
             "body_width": 0
         }
     )
 
-    # 2. Define a configuração de execução
     config = CrawlerRunConfig(
         markdown_generator=md_generator
     )
@@ -34,14 +36,18 @@ async def crawl_url(request: CrawlRequest):
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
-            # Agora result.markdown é um objeto MarkdownGenerationResult
-            # fit_markdown contém o texto limpo pelo filtro
+            # ESTRATÉGIA DE RETORNO:
+            # Se o fit_markdown (filtrado) parecer muito curto (ex: < 500 caracteres),
+            # retornamos o raw_markdown (todo o texto da página, mas sem os links).
+            final_content = result.markdown.fit_markdown
+            if len(final_content) < 500:
+                final_content = result.markdown.raw_markdown
+
             return {
                 "success": True,
                 "url": request.url,
-                "markdown": result.markdown.fit_markdown 
+                "markdown": final_content
             }
             
     except Exception as e:
-        print(f"Erro: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
