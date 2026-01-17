@@ -10,16 +10,14 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração Global do Navegador (O SEGREDO DO BYPASS)
+    # 1. Configuração Global do Navegador
+    # Definimos como o navegador será lançado.
     browser_config = BrowserConfig(
-        headless=True,            # Pode ser True no VPS
-        magic=True,               # Ativa o Magic Mode (Anti-bot robusto)
-        user_agent_mode="random", # Gera identidades diferentes para cada site
-        # Em alguns sites muito agressivos, 'headless=False' pode ser necessário,
-        # mas com 'magic=True', o headless costuma passar bem.
+        headless=True,
+        user_agent_mode="random"  # Identidades randômicas para cada site
     )
 
-    # 2. Gerador de Markdown (Mantendo a limpeza que já ajustamos)
+    # 2. Gerador de Markdown (Mantendo a limpeza de hyperlinks e citações)
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -29,19 +27,18 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 3. Configuração da Corrida (Wait and Delay)
+    # 3. Configuração da Corrida (Onde o "Magic" acontece)
     run_config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        # Espera a rede ficar ociosa (garante que o redirecionamento terminou)
-        wait_until="networkidle", 
-        # DÁ TEMPO para o Cloudflare te mandar para a página real (5 segundos)
-        delay_before_return_html=5.0, 
+        magic=True,               # BYPASS: Ativa comportamento humano (Anti-bot)
+        # Espera o Cloudflare redirecionar após o sucesso
+        wait_until="networkidle",
+        delay_before_return_html=5.0,
         excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
         excluded_selector=".social-share, .sidebar, .menu, .ads"
     )
 
     try:
-        # Importante: Passamos o browser_config na inicialização do crawler
         async with AsyncWebCrawler(config=browser_config) as crawler:
             result = await crawler.arun(url=request.url, config=run_config)
             
@@ -57,4 +54,5 @@ async def crawl_url(request: CrawlRequest):
             }
             
     except Exception as e:
+        # Se der erro de tipo ou qualquer outro, pegamos aqui
         raise HTTPException(status_code=500, detail=str(e))
