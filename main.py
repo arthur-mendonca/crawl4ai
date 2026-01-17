@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI(title="Crawl4AI Clean API")
@@ -10,19 +10,9 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador (Nível Hard)
-    browser_config = BrowserConfig(
-        headless=True,
-        enable_stealth=True,        # Ativa o modo furtivo contra Cloudflare
-        user_agent_mode="random",
-        # Use um contexto persistente para 'guardar' o sucesso do bypass
-        use_persistent_context=True,
-        user_data_dir="/tmp/crawl4ai_profile",
-        # --- SE O CÓDIGO FALHAR, DESCOMENTE A LINHA ABAIXO E USE UM PROXY ---
-        # proxy="http://usuario:senha@ip_do_proxy:porta" 
-    )
-
-    # 2. Gerador de Markdown (Mantendo sua limpeza)
+    # 1. Gerador focado em integridade de texto
+    # Mantemos ignore_links=False para as palavras não sumirem
+    # Ativamos citations=True para que a URL não "suje" o meio da frase
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -32,38 +22,30 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 3. Configuração da Execução
-    run_config = CrawlerRunConfig(
+    # 2. Configuração de Execução de Uso Geral
+    # Usamos excluded_tags para remover o "lixo" estrutural (menus/rodapés)
+    # sem o risco de o filtro de densidade (Pruning) apagar partes do texto real.
+    config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        magic=True,                 # Resolve desafios e remove overlays
-        simulate_user=True,         # Move o mouse e simula cliques
-        override_navigator=True,    # Mascara que é um navegador automatizado
-        
-        # Em vez de esperar pelo 'article' (que pode nunca vir se o IP estiver bloqueado),
-        # usamos um delay longo e tentamos capturar o que houver.
-        wait_until="networkidle",
-        delay_before_return_html=15.0, 
-        
-        excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
-        excluded_selector=".social-share, .sidebar, .menu, .ads"
+        excluded_tags=[
+            "nav", "footer", "header", "aside", 
+            "script", "style", "form", "noscript", 
+            "svg", "canvas"
+        ],
+        # Seletores CSS comuns que costumam conter ruído em diversos sites
+        excluded_selector=".social-share, .sidebar, .menu, .nav-menu, .ads, #comments"
     )
 
     try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=request.url, config=run_config)
+        async with AsyncWebCrawler(verbose=True) as crawler:
+            result = await crawler.arun(url=request.url, config=config)
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
+            # O markdown_with_citations é o campo ideal para inputs de LLMs
+            # pois preserva o texto original e isola as referências.
             final_content = result.markdown.markdown_with_citations
-
-            # Se o conteúdo for muito curto e falar de Cloudflare, o IP da VPS caiu no filtro
-            if "Cloudflare" in final_content and len(final_content) < 1500:
-                return {
-                    "success": False,
-                    "error": "IP da VPS Bloqueado pelo Cloudflare (Datacenter Block). Use um Proxy Residencial.",
-                    "markdown": final_content
-                }
 
             return {
                 "success": True,
