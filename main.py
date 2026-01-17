@@ -2,75 +2,60 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+# Importação necessária para o scroll inteligente [cite: 30]
+from crawl4ai.async_configs import VirtualScrollConfig 
 
-app = FastAPI(title="Crawl4AI Clean API")
+app = FastAPI(title="Crawl4AI Clean API Optimized")
 
 class CrawlRequest(BaseModel):
     url: str
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador "Stealth"
+    # 1. Configuração do Navegador "Stealth" Refinada
     browser_config = BrowserConfig(
-        headless=True,
+        headless=True, # Mude para False se precisar ver o navegador abrindo para debug [cite: 35]
         verbose=True,
         user_agent_mode="random",
-        # Viewport maior ajuda a carregar versão desktop completa
         viewport_width=1920,
         viewport_height=1080,
+        # Define o locale no navegador para garantir conteúdo em PT-BR [cite: 34]
+        locale="pt-BR", 
         headers={
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
         }
     )
 
-    # 2. Script JavaScript Refinado para o MSN
-    # Tenta clicar em "Aceitar", mas se falhar, REMOVE o modal à força.
+    # 2. Configuração de Scroll Virtual (Lazy Loading)
+    # Substitui o scroll manual do seu script JS antigo por uma solução nativa mais robusta [cite: 28, 31]
+    scroll_config = VirtualScrollConfig(
+        container_selector="body",
+        scroll_count=3,           # Faz 3 scrolls para garantir carregamento
+        scroll_by="page_height",
+        wait_after_scroll=1.5     # Espera 1.5s entre scrolls para o conteúdo renderizar
+    )
+
+    # 3. Script JavaScript de Reforço
+    # Mantemos sua lógica para casos onde o 'magic' do Crawl4AI possa falhar
     js_handler = """
     (async () => {
-        console.log("Iniciando script de limpeza...");
-        
-        // Função auxiliar para esperar
+        console.log("Executando script de limpeza complementar...");
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-        // 1. Tentar clicar em botões de consentimento (GDPR/Cookies)
-        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
-        const acceptBtn = buttons.find(btn => 
-            btn.innerText && (
-                btn.innerText.match(/aceit(o|ar)/i) || 
-                btn.innerText.match(/concordo/i) || 
-                btn.innerText.match(/consent/i) ||
-                btn.innerText.match(/continuar/i)
-            )
-        );
-        
-        if (acceptBtn) {
-            console.log("Botão de aceitar encontrado. Clicando...");
-            acceptBtn.click();
-            await sleep(2000);
-        }
-
-        // 2. Tática de "Força Bruta": Remover modais que cobrem a tela
-        // O MSN costuma ter classes como 'peregrine-auth-modal' ou similar
+        // Tenta remover overlays persistentes que o magic mode possa ter perdido
         const overlays = document.querySelectorAll('[class*="modal"], [class*="consent"], [class*="overlay"], [class*="banner"]');
         overlays.forEach(el => {
-            // Só remove se estiver cobrindo a tela e tiver z-index alto
             const style = window.getComputedStyle(el);
             if (style.position === 'fixed' || style.position === 'absolute') {
-                if (parseInt(style.zIndex) > 100) {
-                    console.log("Removendo overlay bloqueador:", el);
+                if (parseInt(style.zIndex) > 50) {
                     el.remove();
                 }
             }
         });
-
-        // 3. Rolar a página para forçar o Lazy Loading do texto
-        window.scrollTo(0, document.body.scrollHeight / 2);
-        await sleep(1000);
-        window.scrollTo(0, 0);
     })();
     """
 
-    # 3. Gerador de Markdown
+    # 4. Gerador de Markdown
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -80,24 +65,33 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 4. Configuração de Execução
+    # 5. Configuração de Execução Otimizada
     config = CrawlerRunConfig(
         markdown_generator=md_generator,
         cache_mode=CacheMode.BYPASS,
+        
+        # --- OTIMIZAÇÕES DO PDF ---
+        
+        # Ativa o tratamento automático de banners/pop-ups 
+        magic=True, 
+        
+        # Simula comportamento humano (mouse, navegador real) para evitar bloqueios [cite: 6, 10]
+        simulate_user=True,
+        override_navigator=True, # [cite: 11]
+        
+        # Injeta o handler JS auxiliar e o config de scroll
         js_code=js_handler,
-        
-        # O PULO DO GATO: Esperar até que exista bastante texto na página
-        # Isso impede que o crawler retorne antes da notícia carregar.
-        wait_for="js:() => document.body.innerText.length > 500",
-        
-        # Se o wait_for acima falhar (timeout), tenta pelo menos esperar o article
-        # wait_for="article", 
-        
-        # Dá um tempo extra após o processamento JS para o DOM estabilizar
-        delay_before_return_html=3.0,
+        virtual_scroll_config=scroll_config, # [cite: 31]
 
-        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "svg", "button"],
-        excluded_selector=".social-share, .sidebar, .ad-container, .related-content"
+        # MUDANÇA CRÍTICA: Esperar pelo seletor CSS do artigo, não por contagem de texto.
+        # Isso garante que a notícia carregou, não apenas o banner de cookies.
+        # Usamos uma lista de seletores comuns em sites de notícias (article, main, div de conteudo)
+        wait_for="css:article, [role='main'], .article-content, #main-content", # 
+        
+        delay_before_return_html=3.0, # Tempo para estabilização após JS [cite: 13]
+
+        excluded_tags=["nav", "footer", "header", "script", "style", "noscript", "svg", "button", "iframe"],
+        excluded_selector=".social-share, .sidebar, .ad-container, .related-content, .cookie-banner"
     )
 
     try:
@@ -105,13 +99,17 @@ async def crawl_url(request: CrawlRequest):
             result = await crawler.arun(url=request.url, config=config)
             
             if not result.success:
+                # Log de erro detalhado
+                print(f"Erro ao raspar: {result.error_message}")
                 raise HTTPException(status_code=500, detail=result.error_message)
 
-            # Validação final: Se o texto for muito curto, provavelmente falhou
+            # Validação do conteúdo
             content_length = len(result.markdown.raw_markdown)
+            
+            # Se ainda vier curto, logamos o aviso.
             if content_length < 300:
-                print(f"ALERTA: Conteúdo muito curto ({content_length} chars). HTML dump: {result.html[:500]}")
-                # Aqui você poderia tentar uma estratégia de fallback se quisesse
+                print(f"ALERTA: Conteúdo curto ({content_length} chars). URL: {request.url}")
+                # Dica do PDF: Em casos reais, aqui você poderia tentar um retry com js_only=True [cite: 38]
 
             return {
                 "success": True,
@@ -121,4 +119,9 @@ async def crawl_url(request: CrawlRequest):
             }
             
     except Exception as e:
+        print(f"Exceção crítica: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
