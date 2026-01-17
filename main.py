@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
-from crawl4ai.content_filter_strategy import PruningContentFilter
 
 app = FastAPI(title="Crawl4AI Clean API")
 
@@ -11,29 +10,28 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Filtro de Conteúdo
-    # O PruningContentFilter remove menus, rodapés e ruídos com base na densidade de texto
-    content_filter = PruningContentFilter(
-        threshold=0.45,           # Sensibilidade para distinguir conteúdo de menus
-        min_word_threshold=30,    # Ignora blocos com poucas palavras
-        threshold_type="dynamic"
-    )
-
-    # 2. Configuração do Gerador de Markdown
+    # 1. Configuração do Gerador de Markdown
+    # REMOVEMOS o PruningContentFilter porque ele buga e remove o texto dos links.
+    # Mantemos ignore_links como False para as palavras não sumirem.
     md_generator = DefaultMarkdownGenerator(
-        content_filter=content_filter,
         options={
-            "ignore_links": False,  # IMPORTANTE: Mantém o texto dos links íntegro
-            "ignore_images": True,
+            "ignore_links": False,    # OBRIGATÓRIO para manter o texto âncora
+            "ignore_images": True,   # Remove imagens para economizar tokens
             "body_width": 0,
-            "citations": True       # Move as URLs para o fim (Referências numeradas)
+            "citations": True        # Transforma links em [1], [2] e joga URLs pro fim
         }
     )
 
-    # 3. Configuração de Execução
-    # Removido o argumento 'main_content_only' que causou o erro
+    # 2. Configuração de Execução
     config = CrawlerRunConfig(
-        markdown_generator=md_generator
+        markdown_generator=md_generator,
+        excluded_tags=[
+            "nav", "footer", "header", "aside", 
+            "script", "style", "form", "noscript", 
+            "svg", "canvas"
+        ],
+        # Remove seletores comuns de redes sociais e menus laterais para qualquer site
+        excluded_selector=".social-share, .sidebar, .menu, .nav-menu, .ads-container"
     )
 
     try:
@@ -42,16 +40,8 @@ async def crawl_url(request: CrawlRequest):
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
-
-            # ESTRATÉGIA DE RETORNO:
-            # O 'fit_markdown' contém apenas o texto principal (limpo pelo PruningFilter)
-            # Como 'citations' está True, ele virá no formato "texto [1]" com referências no fim.
-            final_content = result.markdown.fit_markdown
-
-            # Se o filtro for agressivo demais e o resultado for muito curto,
-            # retornamos a página inteira limpa (markdown_with_citations).
-            if not final_content or len(final_content) < 300:
-                final_content = result.markdown.markdown_with_citations
+            
+            final_content = result.markdown.markdown_with_citations
 
             return {
                 "success": True,
