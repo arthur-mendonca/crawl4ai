@@ -108,33 +108,54 @@ def extract_article_by_density(markdown: str, title: str = "") -> str:
         
         score = min(word_count, 500)
         
+        # Penaliza listas de links (navegação/menu)
         if block.count('[') > 5 or block.count('http') > 3:
-            score -= 50
+            score -= 100
         
+        # Penaliza linhas curtas repetitivas (menu)
         lines = block.split('\n')
         if len(lines) > 5 and sum(len(l) < 50 for l in lines) > len(lines) * 0.7:
-            score -= 30
+            score -= 100
         
+        # Penaliza blocos que são só títulos/headers
+        if block.count('###') > 3 or block.count('##') > 2:
+            score -= 80
+        
+        # Penaliza palavras-chave de navegação
+        nav_words = ['menu', 'toggle', 'submit', 'search', 'topics', 'more from',
+                     'newsletter', 'podcast', 'video', 'contact us', 'staff',
+                     'events', 'login', 'sign up', 'subscribe']
+        if sum(1 for w in nav_words if w in block.lower()) >= 2:
+            score -= 120
+        
+        # Penaliza banners
         banner_words = ['privacy', 'cookie', 'consent', 'partners', 'vendors', 
                        'preferences', 'advertising', 'manage', 'accept', 'reject',
                        'cloudflare', 'checking your browser', 'enable javascript']
         if sum(1 for w in banner_words if w in block.lower()) >= 3:
-            score -= 100
+            score -= 150
         
+        # Bônus para parágrafos de artigo
         score += min(block.count('.') + block.count('!') + block.count('?'), 20)
         
         if block.strip().endswith('.'):
             score += 30
         
+        # Bônus para blocos mais longos (parágrafos completos)
+        if word_count > 50:
+            score += 20
+        
         scored_blocks.append((score, block, word_count))
     
+    # Filtra apenas blocos com score positivo
+    scored_blocks = [b for b in scored_blocks if b[0] > 0]
     scored_blocks.sort(reverse=True, key=lambda x: x[0])
     
     result_blocks = []
     total_words = 0
     
     for score, block, word_count in scored_blocks:
-        if score > 0 and total_words < 2000:
+        if total_words < 2000:
             result_blocks.append(block)
             total_words += word_count
     
