@@ -4,7 +4,7 @@ from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.async_configs import VirtualScrollConfig 
 
-app = FastAPI(title="Crawl4AI Clean API - MSN Killer")
+app = FastAPI(title="Crawl4AI Optimized - DOM Isolation")
 
 class CrawlRequest(BaseModel):
     url: str
@@ -12,11 +12,10 @@ class CrawlRequest(BaseModel):
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
     # 1. Configuração do Navegador
-    # Mantemos simples para evitar erros de inicialização, mas reforçamos o User Agent
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
-        user_agent_mode="random", # Rotaciona para evitar fingerprinting fácil
+        user_agent_mode="random",
         viewport_width=1920,
         viewport_height=1080,
         headers={
@@ -24,97 +23,87 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 2. Scroll Lento e Gradual
-    # O MSN carrega imagens e parágrafos conforme o scroll.
+    # 2. Scroll Virtual
     scroll_config = VirtualScrollConfig(
         container_selector="body",
-        scroll_count=5,           # Aumentei para 5 para garantir leitura profunda
+        scroll_count=4,
         scroll_by="page_height",
-        wait_after_scroll=2.0     # Mais tempo para renderizar imagens
+        wait_after_scroll=2.0 
     )
 
-    # 3. JS "Caçador de Cookies" (Bilíngue e Agressivo)
+    # 3. JS: "Protocolo de Isolamento"
+    # Este script tenta clicar no consentimento. Se falhar, procura o artigo
+    # e DELETA todo o resto do site para sobrar apenas a notícia.
     js_handler = """
     (async () => {
-        console.log(">>> INICIANDO PROTOCOLO ANTI-COOKIE <<<");
+        console.log(">>> INICIANDO PROTOCOLO DE ISOLAMENTO <<<");
         const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-        // 1. Procura Botões de Aceite (PT e EN)
-        // O MSN usa botões, links ou divs com role button
-        const keywords = ['aceit', 'concord', 'consent', 'agree', 'allow', 'yes', 'continue', 'manage'];
+        // --- FASE 1: Tenta Clicar no Consentimento (Bilíngue) ---
+        const buttons = Array.from(document.querySelectorAll('button, a, div[role="button"]'));
+        const keywords = ['aceit', 'agree', 'consent', 'yes', 'allow', 'manage'];
         
-        // Seleciona tudo que é clicável
-        const clickables = Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"]'));
-        
-        let clicked = false;
-        for (const el of clickables) {
-            const text = (el.innerText || "").toLowerCase();
-            // Verifica se tem texto relevante e se está visível
-            if (keywords.some(k => text.includes(k)) && el.offsetParent !== null) {
-                console.log("Botão encontrado: ", text);
-                
-                // Prioridade: Botões de "Aceitar" direto
-                if (text.includes('aceit') || text.includes('agree') || text.includes('yes')) {
-                    try {
-                        el.click();
-                        console.log("CLICADO!");
-                        clicked = true;
-                        await sleep(3000); // Espera o reload da página
-                        break; // Se clicou em Aceitar, paramos
-                    } catch (e) { console.error(e); }
-                }
+        for (const btn of buttons) {
+            const text = (btn.innerText || "").toLowerCase();
+            // Clica apenas se for um botão de consentimento óbvio
+            if (keywords.some(k => text.includes(k)) && text.length < 50) {
+                console.log("Tentando clicar em:", text);
+                try {
+                    btn.click();
+                    await sleep(2000); // Espera reação da página
+                } catch(e) {}
             }
         }
 
-        // 2. Remoção Forçada de Modais (CSS Kill Switch)
-        // Remove divs que cobrem a tela inteira, focando em palavras chave de privacidade
-        const blockers = document.querySelectorAll('div[class*="modal"], div[class*="banner"], div[id*="consent"], div[class*="overlay"]');
-        blockers.forEach(el => {
-            const text = el.innerText.toLowerCase();
-            if (text.includes('cookie') || text.includes('privacy') || text.includes('privacidade')) {
-                console.log("Removendo overlay de privacidade na força bruta.");
-                el.remove();
-            }
-        });
+        // --- FASE 2: Cirurgia de DOM (O Pulo do Gato) ---
+        // Procura pelo conteúdo real da notícia
+        const article = document.querySelector('article') || 
+                        document.querySelector('[role="main"]') || 
+                        document.querySelector('.article-content') ||
+                        document.querySelector('#main');
 
-        // 3. Força o corpo da página a ficar visível (caso o modal tenha deixado hidden)
-        document.body.style.overflow = 'auto';
-        document.body.style.position = 'static';
+        if (article) {
+            console.log("Artigo encontrado! Isolando conteúdo...");
+            // Clona o artigo
+            const content = article.cloneNode(true);
+            // Limpa o corpo do site (remove banners, menus, footers, scripts)
+            document.body.innerHTML = '';
+            // Insere apenas o artigo limpo
+            document.body.appendChild(content);
+        } else {
+            console.log("Artigo não encontrado. Tentando remover overlays na força bruta...");
+            // Se não achou o artigo, remove modais conhecidos
+            document.querySelectorAll('.modal, .banner, .overlay, [id*="cookie"]').forEach(el => el.remove());
+        }
     })();
     """
 
     # 4. Gerador de Markdown
     md_generator = DefaultMarkdownGenerator(
         options={
-            "ignore_links": True,  # Ignora links para limpar o texto
-            "ignore_images": True,
+            "ignore_links": True,
+            "ignore_images": True, 
             "body_width": 0,
-            "citations": False     # Desliga citações para limpar poluição visual
+            "citations": False
         }
     )
 
-    # 5. Configuração de Execução
+    # 5. Run Config
     config = CrawlerRunConfig(
         markdown_generator=md_generator,
         cache_mode=CacheMode.BYPASS,
-        
         magic=True,
         simulate_user=True,
         override_navigator=True,
-        
         js_code=js_handler,
         virtual_scroll_config=scroll_config,
-
-        # O PULO DO GATO REAL:
-        # Não espere só pelo "article". Espere que o "article" tenha TEXTO dentro.
-        # Isso evita pegar um <article> vazio enquanto o loader gira.
-        wait_for="js:() => { return document.querySelector('article') && document.querySelector('article').innerText.length > 200; }",
         
-        # Aumentamos o delay final para garantir que, se houve reload, pegamos a pág nova
-        delay_before_return_html=4.0,
-
-        # LISTA NEGRA: Removemos explicitamente as divs de consentimento do MSN
-        excluded_selector=".ms-consent-banner, #cookie-banner, .privacy-modal, div[aria-label='Privacy'], .peregrine-auth-modal, nav, footer, .sidebar"
+        # Aguarda até que exista um article OU que o body tenha mudado
+        wait_for="css:body", 
+        delay_before_return_html=3.0,
+        
+        # Exclusão redundante para garantir
+        excluded_selector="#cookie-banner, .ms-consent-banner, .privacy-modal"
     )
 
     try:
@@ -124,27 +113,44 @@ async def crawl_url(request: CrawlRequest):
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
-            content_length = len(result.markdown.raw_markdown)
+            raw_md = result.markdown.raw_markdown
+
+            # --- FASE 3: Limpeza Python Pós-Processamento ---
+            # Se o JS falhar e o banner vier, cortamos ele aqui.
+            # Adicionei os termos em Inglês que apareceram no seu log.
+            block_phrases = [
+                "Microsoft Cares About Your Privacy", 
+                "A Microsoft Preocupa-se Com a Sua Privacidade",
+                "We and our partners process data"
+            ]
             
-            # Filtro Pós-Processamento
-            # Se o texto ainda começar com o aviso da Microsoft, cortamos ele manualmente
-            markdown_clean = result.markdown.raw_markdown
-            if "Microsoft Cares About Your Privacy" in markdown_clean or "A Microsoft Preocupa-se" in markdown_clean:
-                print("ALERTA: Banner detectado no output. Tentando limpar via string split...")
-                # Tenta pegar tudo DEPOIS do banner (assumindo que o banner vem no topo)
-                parts = markdown_clean.split("Declaração de Privacidade")
-                if len(parts) > 1:
-                    markdown_clean = parts[-1]
+            # Se encontrar frases do banner, tenta limpar
+            if any(phrase in raw_md for phrase in block_phrases):
+                print("Banner detectado no Python. Aplicando split...")
+                # Tenta separar pelo termo "Privacy Statement" ou "Declaração de Privacidade"
+                # O texto real da notícia costuma vir DEPOIS disso.
+                separators = ["Privacy Statement", "Declaração de Privacidade", "Manage Preferences", "Gerenciar preferências"]
+                
+                for sep in separators:
+                    if sep in raw_md:
+                        parts = raw_md.split(sep)
+                        # Pega a última parte (assumindo que o banner está no topo)
+                        if len(parts) > 1:
+                            candidate_text = parts[-1]
+                            # Se o corte resultou em algo útil, atualizamos
+                            if len(candidate_text) > 200:
+                                raw_md = candidate_text
+                                break
             
             return {
                 "success": True,
                 "url": request.url,
-                "content_length": len(markdown_clean),
-                "markdown": markdown_clean # Retorna o texto limpo
+                "content_length": len(raw_md),
+                "markdown": raw_md.strip()
             }
             
     except Exception as e:
-        print(f"Exceção: {str(e)}")
+        print(f"Erro Crítico: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
