@@ -3,22 +3,22 @@ from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-app = FastAPI(title="Crawl4AI Anti-Bot API")
+app = FastAPI(title="Crawl4AI Clean API")
 
 class CrawlRequest(BaseModel):
     url: str
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador
-    # enable_stealth aplica patches de furtividade para burlar detecções básicas
+    # 1. Configuração do Navegador com Stealth Mode ATIVADO
+    # 'enable_stealth' é o que realmente mascara o Playwright contra o Cloudflare
     browser_config = BrowserConfig(
         headless=True,
         user_agent_mode="random",
-        enable_stealth=True  # Essencial para passar pelo Cloudflare
+        enable_stealth=True,  # CRUCIAL para passar pelo desafio Turnstile
     )
 
-    # 2. Gerador de Markdown
+    # 2. Gerador de Markdown (Mantendo a limpeza de links)
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -28,20 +28,22 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 3. Configuração da Execução (Onde o Bypass acontece)
+    # 3. Configuração de Execução com Delay de Redirecionamento
     run_config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        magic=True,               # Tenta lidar automaticamente com desafios e popups
-        simulate_user=True,       # Simula movimentos de mouse e interações humanas
-        override_navigator=True,  # Mascara propriedades do navegador
+        magic=True,              # Lida com popups e frames de desafio
+        simulate_user=True,      # Simula movimentos humanos para não ser banido
+        override_navigator=True, # Força o navegador a parecer um Chrome comum
         
-        # MUDANÇA CRUCIAL: Voltamos para 'domcontentloaded' para evitar o Timeout de 60s
-        # e usamos um delay maior para dar tempo do Cloudflare redirecionar.
+        # 'domcontentloaded' evita o timeout de 60s do 'networkidle'
         wait_until="domcontentloaded", 
-        delay_before_return_html=10.0, # 10 segundos é o tempo ideal para o bypass do Turnstile
+        
+        # Aumentamos para 15 segundos. O Cloudflare leva tempo para redirecionar 
+        # após o "Vérification réussie". Se capturar antes, a página vem vazia.
+        delay_before_return_html=15.0, 
         
         excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
-        excluded_selector=".social-share, .sidebar, .menu, .ads"
+        excluded_selector=".social-share, .sidebar, .menu, .ads, .tp-ads"
     )
 
     try:
@@ -52,6 +54,14 @@ async def crawl_url(request: CrawlRequest):
                 raise HTTPException(status_code=500, detail=result.error_message)
 
             final_content = result.markdown.markdown_with_citations
+
+            # Se o conteúdo ainda vier com sinais de Cloudflare, avisamos
+            if "Cloudflare" in final_content and len(final_content) < 1000:
+                return {
+                    "success": False,
+                    "error": "Bloqueio do Cloudflare detectado. Tente novamente em alguns instantes.",
+                    "markdown": final_content
+                }
 
             return {
                 "success": True,
