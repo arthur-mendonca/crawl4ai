@@ -11,20 +11,21 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração balanceada do gerador
+    # 1. Configuração do gerador para preservar texto e limpar URLs
     md_generator = DefaultMarkdownGenerator(
         content_filter=PruningContentFilter(
-            threshold=0.3,           # Reduzido de 0.45 para 0.3 para manter mais texto
-            min_word_threshold=20,    # Reduzido de 50 para 20 para não descartar parágrafos curtos
-            threshold_type="dynamic"  # Ajusta o limite automaticamente com base nos dados da página
+            threshold=0.3,            
+            min_word_threshold=20,    
+            threshold_type="dynamic"  
         ),
         options={
-            "ignore_links": True,   # Isso garante que mesmo no 'raw_markdown' não haverá links
+            "ignore_links": False,  # OBRIGATÓRIO: Se for True, o texto do link desaparece!
             "ignore_images": True,
             "body_width": 0
         }
     )
 
+    # O segredo está em 'citations=True' no CrawlerRunConfig (ou no generator)
     config = CrawlerRunConfig(
         markdown_generator=md_generator
     )
@@ -35,14 +36,9 @@ async def crawl_url(request: CrawlRequest):
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
-
-            # ESTRATÉGIA DE RETORNO:
-            # Se o fit_markdown (filtrado) parecer muito curto (ex: < 500 caracteres),
-            # retornamos o raw_markdown (todo o texto da página, mas sem os links).
-            final_content = result.markdown.fit_markdown
-            if len(final_content) < 500:
-                final_content = result.markdown.raw_markdown
-
+                
+            final_content = result.markdown.markdown_with_citations
+            
             return {
                 "success": True,
                 "url": request.url,
