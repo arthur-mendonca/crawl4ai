@@ -4,13 +4,14 @@ FROM python:3.11-slim-bookworm
 # Define variáveis de ambiente para evitar arquivos .pyc e logs presos
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # Define onde os navegadores do Playwright serão instalados para serem acessíveis
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Define o diretório de trabalho
 WORKDIR /app
 
-# 1. Instala dependências do SO necessárias para o Playwright e compilação
-# (Baseado no oficial, mas removendo coisas de GPU/Redis desnecessárias)
+# 1. Instala dependências do SO (como root)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -18,22 +19,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. Copia o arquivo de requisitos que você já tem
+# 2. Instala as dependências Python (como root)
 COPY requirements.txt .
-
-# 3. Instala as dependências Python (Crawl4AI, FastAPI, Uvicorn, etc.)
-# O seu requirements.txt já tem tudo o que precisamos
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
-# 4. Instala os navegadores do Playwright e suas dependências de SO
-# O comando "playwright install-deps" é crucial no Linux
+# 3. Instala os navegadores do Playwright e dependências de SO (como root)
 RUN playwright install --with-deps chromium
 
-# 5. Copia o restante do seu código (incluindo o main.py)
-COPY . .
+# 4. Criar o usuário e preparar as pastas
+# Criamos a pasta de navegadores e a /app com as permissões para o appuser
+RUN useradd -m appuser && \
+    mkdir -p /ms-playwright && \
+    chown -R appuser:appuser /app /ms-playwright
 
-# Expõe a porta que definimos no main.py
+# 5. Copia o restante do seu código definindo o dono como appuser
+COPY --chown=appuser:appuser . .
+
+# Agora sim, mudamos para o usuário não-root para rodar a aplicação
+USER appuser
+
+# Expõe a porta (Coolify usará a variável PORT=8000)
 EXPOSE 8000
 
 # Comando para iniciar sua API
