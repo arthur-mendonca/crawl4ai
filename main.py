@@ -11,18 +11,18 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configura o gerador para ignorar links e imagens
+    # 1. Configura o gerador para ignorar links/imagens e aplicar o filtro de limpeza
     md_generator = DefaultMarkdownGenerator(
-        # O PruningContentFilter remove menus, footers e sidebar baseado na densidade de texto
+        # O PruningContentFilter remove o "lixo" (menus, rodapés) baseado na densidade de texto
         content_filter=PruningContentFilter(threshold=0.45, min_word_threshold=50),
         options={
-            "ignore_links": True,   # Remove todos os links [texto](url)
-            "ignore_images": True,  # Remove todas as imagens ![alt](url)
-            "body_width": 0         # Não quebra linhas por largura fixa
+            "ignore_links": True,   # Remove links: transforma [texto](url) em apenas texto
+            "ignore_images": True,  # Remove todas as imagens
+            "body_width": 0
         }
     )
 
-    # 2. Define a configuração de execução do crawler
+    # 2. Define a configuração de execução
     config = CrawlerRunConfig(
         markdown_generator=md_generator
     )
@@ -34,12 +34,14 @@ async def crawl_url(request: CrawlRequest):
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
+            # Agora result.markdown é um objeto MarkdownGenerationResult
+            # fit_markdown contém o texto limpo pelo filtro
             return {
                 "success": True,
                 "url": request.url,
-                # 'fit_markdown' contém a versão processada pelo filtro (sem lixo)
-                "markdown": result.markdown_v2.fit_markdown if result.markdown_v2 else result.markdown
+                "markdown": result.markdown.fit_markdown 
             }
             
     except Exception as e:
+        print(f"Erro: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
