@@ -3,82 +3,137 @@ from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.async_configs import VirtualScrollConfig
-from crawl4ai.extraction_strategy import LLMExtractionStrategy
 import re
-from collections import Counter
+import json
+import httpx
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 
-app = FastAPI(title="Crawl4AI v3 - Text Density Extraction")
+app = FastAPI(title="Crawl4AI v4 - MSN API + Anti-Bot")
 
 class CrawlRequest(BaseModel):
     url: str
-    min_words: int = 100  # Mínimo de palavras para considerar válido
+    min_words: int = 100
+
+def extract_msn_article_id(url: str) -> str | None:
+    """Extrai o ID do artigo de URLs do MSN (ex: AA1UiYJv)"""
+    match = re.search(r'/ar-([A-Z0-9]+)', url)
+    return match.group(1) if match else None
+
+async def fetch_msn_api(article_id: str) -> dict | None:
+    """Busca conteúdo direto da API do MSN"""
+    # Detecta idioma da URL (padrão en-us)
+    locale = "en-us"  # Pode ser extraído da URL original se necessário
+    
+    api_url = f"https://assets.msn.com/content/view/v2/Detail/{locale}/{article_id}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://www.msn.com/"
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(api_url, headers=headers)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"❌ MSN API retornou {response.status_code}")
+                return None
+    except Exception as e:
+        print(f"❌ Erro ao buscar MSN API: {e}")
+        return None
+
+def msn_json_to_markdown(data: dict) -> str:
+    """Converte JSON da API do MSN para markdown"""
+    parts = []
+    
+    # Título
+    if 'title' in data:
+        parts.append(f"# {data['title']}\n")
+    
+    # Autores
+    if 'authors' in data and data['authors']:
+        authors = ', '.join(a.get('name', '') for a in data['authors'])
+        parts.append(f"**Por:** {authors}\n")
+    
+    # Abstract/resumo
+    if 'abstract' in data:
+        parts.append(f"*{data['abstract']}*\n")
+    
+    # Corpo do artigo (HTML)
+    if 'body' in data:
+        # Remove tags HTML e converte para texto limpo
+        soup = BeautifulSoup(data['body'], 'html.parser')
+        
+        # Remove scripts, styles, etc
+        for tag in soup(['script', 'style', 'iframe', 'noscript']):
+            tag.decompose()
+        
+        # Extrai texto
+        text = soup.get_text(separator='\n', strip=True)
+        
+        # Limpa linhas vazias excessivas
+        text = re.sub(r'\n{3,}', '\n\n', text)
+        
+        parts.append(text)
+    
+    # Fonte original
+    if 'sourceHref' in data:
+        parts.append(f"\n---\n**Fonte:** [{data['sourceHref']}]({data['sourceHref']})")
+    
+    return '\n\n'.join(parts)
 
 def extract_article_by_density(markdown: str, title: str = "") -> str:
-    """
-    Extrai o artigo procurando pelos blocos com maior densidade de texto
-    """
-    # Remove múltiplas quebras de linha
+    """Extrai artigo por densidade de texto (fallback)"""
     markdown = re.sub(r'\n{3,}', '\n\n', markdown)
-    
-    # Divide em blocos por dupla quebra de linha
     blocks = [b.strip() for b in markdown.split('\n\n') if b.strip()]
     
-    # Analisa cada bloco
     scored_blocks = []
     for block in blocks:
         words = block.split()
         word_count = len(words)
         
-        # Skip blocos muito pequenos
         if word_count < 10:
             continue
         
-        # Calcula score baseado em características de artigo
-        score = 0
+        score = min(word_count, 500)
         
-        # +1 por palavra (até 500 palavras)
-        score += min(word_count, 500)
-        
-        # -50 se tiver muito link (navegação)
         if block.count('[') > 5 or block.count('http') > 3:
             score -= 50
         
-        # -30 se for lista de links curtos
         lines = block.split('\n')
         if len(lines) > 5 and sum(len(l) < 50 for l in lines) > len(lines) * 0.7:
             score -= 30
         
-        # -100 se tiver palavras-chave de banner
         banner_words = ['privacy', 'cookie', 'consent', 'partners', 'vendors', 
-                       'preferences', 'advertising', 'manage', 'accept', 'reject']
+                       'preferences', 'advertising', 'manage', 'accept', 'reject',
+                       'cloudflare', 'checking your browser', 'enable javascript']
         if sum(1 for w in banner_words if w in block.lower()) >= 3:
             score -= 100
         
-        # +20 se tiver pontuação de artigo (. ! ?)
         score += min(block.count('.') + block.count('!') + block.count('?'), 20)
         
-        # +30 se tiver parágrafos completos (termina com ponto)
         if block.strip().endswith('.'):
             score += 30
         
         scored_blocks.append((score, block, word_count))
     
-    # Ordena por score
     scored_blocks.sort(reverse=True, key=lambda x: x[0])
     
-    # Pega os top blocos até atingir bom tamanho
     result_blocks = []
     total_words = 0
     
     for score, block, word_count in scored_blocks:
-        if score > 0 and total_words < 2000:  # Até 2000 palavras
+        if score > 0 and total_words < 2000:
             result_blocks.append(block)
             total_words += word_count
     
-    # Monta resultado
     result = '\n\n'.join(result_blocks)
     
-    # Adiciona título no topo se não tiver
     if title and not result.startswith('#'):
         result = f"# {title}\n\n{result}"
     
@@ -86,7 +141,43 @@ def extract_article_by_density(markdown: str, title: str = "") -> str:
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
+    url = request.url
     
+    # ===== ESTRATÉGIA 1: MSN API DIRETA =====
+    if 'msn.com' in url:
+        article_id = extract_msn_article_id(url)
+        
+        if article_id:
+            print(f"🎯 MSN detectado! ID do artigo: {article_id}")
+            print(f"📡 Buscando via API...")
+            
+            msn_data = await fetch_msn_api(article_id)
+            
+            if msn_data:
+                markdown = msn_json_to_markdown(msn_data)
+                word_count = len(markdown.split())
+                
+                print(f"✅ Extraído da API do MSN: {word_count} palavras")
+                
+                return {
+                    "success": True,
+                    "url": url,
+                    "title": msn_data.get('title', ''),
+                    "content_length": len(markdown),
+                    "word_count": word_count,
+                    "quality_check": {
+                        "has_content": word_count > 50,
+                        "word_count": word_count,
+                        "likely_article": word_count >= request.min_words,
+                        "extraction_method": "msn_api"
+                    },
+                    "markdown": markdown,
+                    "source": msn_data.get('sourceHref', url)
+                }
+            else:
+                print("⚠️ API do MSN falhou, tentando crawl normal...")
+    
+    # ===== ESTRATÉGIA 2: CRAWL NORMAL COM ANTI-BOT MÁXIMO =====
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
@@ -96,14 +187,25 @@ async def crawl_url(request: CrawlRequest):
         headers={
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
         }
     )
 
-    # JS MINIMALISTA - só remove overlays e clica em consentimento
+    # JS para bypass de Cloudflare e outros bots
     js_handler = """
     (async () => {
         const sleep = ms => new Promise(r => setTimeout(r, ms));
-        await sleep(2000);
+        
+        // Espera inicial mais longa para Cloudflare
+        await sleep(5000);
+        
+        // Procura por challenge do Cloudflare
+        const cfChallenge = document.querySelector('#challenge-running');
+        if (cfChallenge) {
+            console.log('⏳ Cloudflare challenge detectado, aguardando...');
+            await sleep(8000); // Espera o challenge resolver
+        }
         
         // Remove overlays
         ['.modal', '.overlay', '[aria-modal="true"]', '[class*="consent"]', 
@@ -111,20 +213,26 @@ async def crawl_url(request: CrawlRequest):
             document.querySelectorAll(sel).forEach(el => el.remove());
         });
         
-        // Clica em aceitar se existir
+        // Clica em aceitar
         const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
         const acceptBtn = btns.find(b => 
-            /accept|agree|ok|continue/i.test(b.innerText) && b.innerText.length < 50
+            /accept|agree|ok|continue|aceitar|permitir/i.test(b.innerText) && 
+            b.innerText.length < 60
         );
         if (acceptBtn) {
+            console.log('✅ Clicando em aceitar');
             acceptBtn.click();
-            await sleep(2000);
+            await sleep(3000);
         }
         
-        // Scroll para carregar lazy content
-        window.scrollTo(0, document.body.scrollHeight);
-        await sleep(1000);
+        // Scroll completo
+        for (let i = 0; i < 3; i++) {
+            window.scrollTo(0, document.body.scrollHeight);
+            await sleep(1500);
+        }
         window.scrollTo(0, 0);
+        
+        console.log('🏁 JS concluído');
     })();
     """
 
@@ -141,7 +249,7 @@ async def crawl_url(request: CrawlRequest):
         container_selector="body",
         scroll_count=3,
         scroll_by="page_height",
-        wait_after_scroll=1.0
+        wait_after_scroll=1.5
     )
 
     config = CrawlerRunConfig(
@@ -153,15 +261,14 @@ async def crawl_url(request: CrawlRequest):
         js_code=js_handler,
         virtual_scroll_config=scroll_config,
         wait_for="js:() => document.readyState === 'complete'",
-        page_timeout=45000,  # 45s (reduzido para evitar timeout)
-        delay_before_return_html=3.0,
-        excluded_tags=['script', 'style', 'iframe', 'noscript'],
-        excluded_selector="#cookie-banner, .ms-consent-banner, .privacy-modal"
+        page_timeout=60000,  # 60s para dar tempo ao Cloudflare
+        delay_before_return_html=8.0,  # Delay longo para challenges
+        excluded_tags=['script', 'style', 'iframe', 'noscript']
     )
 
     try:
         async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=request.url, config=config)
+            result = await crawler.arun(url=url, config=config)
             
             if not result.success:
                 raise HTTPException(
@@ -171,37 +278,38 @@ async def crawl_url(request: CrawlRequest):
 
             raw_md = result.markdown.raw_markdown
             
-            # Extrai título da página
             title = ""
             if result.metadata and 'title' in result.metadata:
                 title = result.metadata['title']
             
             print(f"\n{'='*60}")
-            print(f"URL: {request.url}")
+            print(f"URL: {url}")
             print(f"Markdown bruto: {len(raw_md)} chars")
-            print(f"HTML: {len(result.html) if result.html else 0} chars")
             print(f"Título: {title}")
             
-            # ===== EXTRAÇÃO POR DENSIDADE DE TEXTO =====
-            cleaned_md = extract_article_by_density(raw_md, title)
+            # Detecta página de challenge
+            if any(kw in raw_md.lower() for kw in 
+                  ['cloudflare', 'checking your browser', 'enable javascript', 'um momento']):
+                print("⚠️ Página de challenge/verificação detectada")
             
-            # Validação de qualidade
+            # Extração por densidade
+            cleaned_md = extract_article_by_density(raw_md, title)
             word_count = len(cleaned_md.split())
             
-            # Se ainda muito pequeno, tenta fallback: pega parágrafos >100 chars
+            # Fallback para parágrafos longos
             if word_count < request.min_words:
-                print("⚠️ Tentando fallback: extração de parágrafos longos...")
+                print("⚠️ Fallback: extração de parágrafos...")
                 paragraphs = re.findall(r'([^\n]{100,})', raw_md)
                 
-                # Filtra parágrafos de banner
                 good_paragraphs = [
                     p for p in paragraphs 
                     if not any(kw in p.lower() for kw in 
-                              ['cookie', 'privacy', 'consent', 'vendor', 'preference'])
+                              ['cookie', 'privacy', 'consent', 'cloudflare', 
+                               'checking', 'browser', 'javascript'])
                 ]
                 
                 if good_paragraphs:
-                    cleaned_md = '\n\n'.join(good_paragraphs[:10])  # Top 10
+                    cleaned_md = '\n\n'.join(good_paragraphs[:10])
                     if title:
                         cleaned_md = f"# {title}\n\n{cleaned_md}"
                     word_count = len(cleaned_md.split())
@@ -218,14 +326,13 @@ async def crawl_url(request: CrawlRequest):
             
             return {
                 "success": True,
-                "url": request.url,
+                "url": url,
                 "title": title,
                 "content_length": len(cleaned_md),
                 "word_count": word_count,
                 "quality_check": quality_check,
                 "markdown": cleaned_md,
-                "raw_markdown_length": len(raw_md),
-                "raw_html_length": len(result.html) if result.html else 0
+                "raw_markdown_length": len(raw_md)
             }
             
     except Exception as e:
@@ -234,41 +341,7 @@ async def crawl_url(request: CrawlRequest):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "crawl4ai-v3"}
-
-@app.post("/crawl/debug")
-async def crawl_debug(request: CrawlRequest):
-    """
-    Endpoint de debug que retorna o markdown bruto SEM processamento
-    """
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        user_agent_mode="random",
-        viewport_width=1920,
-        viewport_height=1080
-    )
-
-    config = CrawlerRunConfig(
-        markdown_generator=DefaultMarkdownGenerator(),
-        cache_mode=CacheMode.BYPASS,
-        wait_for="js:() => document.readyState === 'complete'",
-        page_timeout=30000,
-        delay_before_return_html=2.0
-    )
-
-    try:
-        async with AsyncWebCrawler(config=browser_config) as crawler:
-            result = await crawler.arun(url=request.url, config=config)
-            
-            return {
-                "success": result.success,
-                "url": request.url,
-                "raw_markdown": result.markdown.raw_markdown[:5000],  # Primeiros 5000 chars
-                "full_length": len(result.markdown.raw_markdown)
-            }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"status": "healthy", "service": "crawl4ai-v4"}
 
 if __name__ == "__main__":
     import uvicorn
