@@ -17,11 +17,9 @@ async def crawl_url(request: CrawlRequest):
     browser_config = BrowserConfig(
         headless=True,
         verbose=True,
-        log_console=True,  # Ver logs JS no console
         user_agent_mode="random",
         viewport_width=1920,
         viewport_height=1080,
-        locale="pt-BR",  # Força idioma PT-BR
         headers={
             "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
