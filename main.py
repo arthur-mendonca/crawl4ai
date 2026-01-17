@@ -11,23 +11,28 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do gerador para preservar texto e limpar URLs
+    # 1. Filtro de conteúdo mais inteligente
+    # O PruningContentFilter remove menus e rodapés baseando-se na densidade de texto
+    content_filter = PruningContentFilter(
+        threshold=0.45,           # Aumentamos um pouco para ser mais rigoroso com menus
+        min_word_threshold=30,    # Parágrafos muito curtos (geralmente lixo) são ignorados
+        threshold_type="dynamic"
+    )
+
     md_generator = DefaultMarkdownGenerator(
-        content_filter=PruningContentFilter(
-            threshold=0.3,            
-            min_word_threshold=20,    
-            threshold_type="dynamic"  
-        ),
+        content_filter=content_filter,
         options={
-            "ignore_links": False,  # OBRIGATÓRIO: Se for True, o texto do link desaparece!
+            "ignore_links": False, 
             "ignore_images": True,
-            "body_width": 0
+            "body_width": 0,
+            "citations": True      # Habilita o modo de citações no gerador
         }
     )
 
-    # O segredo está em 'citations=True' no CrawlerRunConfig (ou no generator)
     config = CrawlerRunConfig(
-        markdown_generator=md_generator
+        markdown_generator=md_generator,
+        # Importante: Queremos que o crawler foque no conteúdo principal
+        main_content_only=True     # Tenta identificar o <main> ou <article> automaticamente
     )
 
     try:
@@ -36,9 +41,15 @@ async def crawl_url(request: CrawlRequest):
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
-                
-            final_content = result.markdown.markdown_with_citations
-            
+
+            # O 'fit_markdown' agora conterá apenas o texto relevante 
+            # E como 'citations' está True, ele virá limpo com as referências no fim.
+            final_content = result.markdown.fit_markdown
+
+            # Backup caso o filtro seja agressivo demais
+            if not final_content or len(final_content) < 300:
+                final_content = result.markdown.markdown_with_citations
+
             return {
                 "success": True,
                 "url": request.url,
