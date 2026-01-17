@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
-import os
 
 app = FastAPI(title="Crawl4AI Clean API")
 
@@ -11,18 +10,19 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Navegador Gerenciado
-    # 'use_persistent_context' cria um perfil real, dificultando o bloqueio por IP/Datacenter.
+    # 1. Configuração do Navegador (Nível Hard)
     browser_config = BrowserConfig(
         headless=True,
-        enable_stealth=True,
+        enable_stealth=True,        # Ativa o modo furtivo contra Cloudflare
         user_agent_mode="random",
-        # Isso cria uma pasta temporária para salvar a sessão do "humano"
-        use_persistent_context=True, 
-        user_data_dir="/tmp/crawl4ai_profile"
+        # Use um contexto persistente para 'guardar' o sucesso do bypass
+        use_persistent_context=True,
+        user_data_dir="/tmp/crawl4ai_profile",
+        # --- SE O CÓDIGO FALHAR, DESCOMENTE A LINHA ABAIXO E USE UM PROXY ---
+        # proxy="http://usuario:senha@ip_do_proxy:porta" 
     )
 
-    # 2. Gerador de Markdown (Mantendo sua integridade de links)
+    # 2. Gerador de Markdown (Mantendo sua limpeza)
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -32,24 +32,20 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 3. Configuração de Execução com "Gatilho de Conteúdo"
+    # 3. Configuração da Execução
     run_config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        magic=True,
-        simulate_user=True,
-        override_navigator=True,
+        magic=True,                 # Resolve desafios e remove overlays
+        simulate_user=True,         # Move o mouse e simula cliques
+        override_navigator=True,    # Mascara que é um navegador automatizado
         
-        # O SEGREDO: Esperamos até que um seletor de conteúdo real apareça.
-        # Quase todo site de notícia usa a tag <article>. Se ele vir o Cloudflare, 
-        # ele vai esperar até o redirect acontecer e o <article> carregar.
-        wait_for="css:article", 
-        
-        # Aumentamos o timeout global para dar tempo do desafio ser resolvido
-        page_timeout=60000, 
-        delay_before_return_html=5.0, # Pequeno delay extra após o <article> aparecer
+        # Em vez de esperar pelo 'article' (que pode nunca vir se o IP estiver bloqueado),
+        # usamos um delay longo e tentamos capturar o que houver.
+        wait_until="networkidle",
+        delay_before_return_html=15.0, 
         
         excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
-        excluded_selector=".social-share, .sidebar, .menu, .ads, .tp-ads"
+        excluded_selector=".social-share, .sidebar, .menu, .ads"
     )
 
     try:
@@ -57,16 +53,15 @@ async def crawl_url(request: CrawlRequest):
             result = await crawler.arun(url=request.url, config=run_config)
             
             if not result.success:
-                # Se der timeout no wait_for, significa que ele ficou preso no Cloudflare
-                raise HTTPException(status_code=500, detail=f"Falha ao carregar conteúdo real: {result.error_message}")
+                raise HTTPException(status_code=500, detail=result.error_message)
 
             final_content = result.markdown.markdown_with_citations
 
-            # Verificação final de segurança
+            # Se o conteúdo for muito curto e falar de Cloudflare, o IP da VPS caiu no filtro
             if "Cloudflare" in final_content and len(final_content) < 1500:
-                 return {
+                return {
                     "success": False,
-                    "error": "Ainda preso no desafio do Cloudflare. O IP da sua VPS pode estar na blacklist.",
+                    "error": "IP da VPS Bloqueado pelo Cloudflare (Datacenter Block). Use um Proxy Residencial.",
                     "markdown": final_content
                 }
 
