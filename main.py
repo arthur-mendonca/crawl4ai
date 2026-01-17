@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from crawl4ai import AsyncWebCrawler, CrawlerRunConfig
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
 app = FastAPI(title="Crawl4AI Clean API")
@@ -10,37 +10,44 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração do Gerador de Markdown
-    # REMOVEMOS o PruningContentFilter porque ele buga e remove o texto dos links.
-    # Mantemos ignore_links como False para as palavras não sumirem.
+    # 1. Configuração Global do Navegador (O SEGREDO DO BYPASS)
+    browser_config = BrowserConfig(
+        headless=True,            # Pode ser True no VPS
+        magic=True,               # Ativa o Magic Mode (Anti-bot robusto)
+        user_agent_mode="random", # Gera identidades diferentes para cada site
+        # Em alguns sites muito agressivos, 'headless=False' pode ser necessário,
+        # mas com 'magic=True', o headless costuma passar bem.
+    )
+
+    # 2. Gerador de Markdown (Mantendo a limpeza que já ajustamos)
     md_generator = DefaultMarkdownGenerator(
         options={
-            "ignore_links": False,    # OBRIGATÓRIO para manter o texto âncora
-            "ignore_images": True,   # Remove imagens para economizar tokens
+            "ignore_links": False,
+            "ignore_images": True,
             "body_width": 0,
-            "citations": True        # Transforma links em [1], [2] e joga URLs pro fim
+            "citations": True
         }
     )
 
-    # 2. Configuração de Execução
-    config = CrawlerRunConfig(
+    # 3. Configuração da Corrida (Wait and Delay)
+    run_config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        excluded_tags=[
-            "nav", "footer", "header", "aside", 
-            "script", "style", "form", "noscript", 
-            "svg", "canvas"
-        ],
-        # Remove seletores comuns de redes sociais e menus laterais para qualquer site
-        excluded_selector=".social-share, .sidebar, .menu, .nav-menu, .ads-container"
+        # Espera a rede ficar ociosa (garante que o redirecionamento terminou)
+        wait_until="networkidle", 
+        # DÁ TEMPO para o Cloudflare te mandar para a página real (5 segundos)
+        delay_before_return_html=5.0, 
+        excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
+        excluded_selector=".social-share, .sidebar, .menu, .ads"
     )
 
     try:
-        async with AsyncWebCrawler(verbose=True) as crawler:
-            result = await crawler.arun(url=request.url, config=config)
+        # Importante: Passamos o browser_config na inicialização do crawler
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            result = await crawler.arun(url=request.url, config=run_config)
             
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
-            
+
             final_content = result.markdown.markdown_with_citations
 
             return {
