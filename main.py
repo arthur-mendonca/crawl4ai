@@ -40,16 +40,19 @@ async def crawl_url(request: CrawlRequest):
         console.log("🚀 INICIANDO PROTOCOLO ANTI-BANNER v2");
         const sleep = ms => new Promise(r => setTimeout(r, ms));
         
-        // ===== FASE 1: Remoção Agressiva de Overlays =====
-        await sleep(1500); // Espera inicial para modais aparecerem
+        // ===== FASE 1: Espera Adicional para Conteúdo Dinâmico =====
+        await sleep(3000); // Espera 3s para conteúdo carregar
         
+        // ===== FASE 2: Remoção Agressiva de Overlays =====
         const overlaySelectors = [
             '.modal', '.popup', '.overlay', '.consent', '.cookie',
             '[class*="cookie"]', '[id*="cookie"]', '[class*="consent"]',
             '[id*="consent"]', '[class*="privacy"]', '[id*="privacy"]',
             '.ms-consent-banner', '#ms-consent-banner', 
             '[class*="gdpr"]', '[aria-modal="true"]',
-            '.privacy-modal', '.cookie-banner', '.consent-banner'
+            '.privacy-modal', '.cookie-banner', '.consent-banner',
+            // MSN específico
+            '#consent-prompt-overlay', '.consent-prompt'
         ];
         
         overlaySelectors.forEach(sel => {
@@ -62,13 +65,13 @@ async def crawl_url(request: CrawlRequest):
         // Remove elementos com position:fixed que bloqueiam tela
         document.querySelectorAll('*').forEach(el => {
             const style = window.getComputedStyle(el);
-            if (style.position === 'fixed' && style.zIndex > 1000) {
+            if (style.position === 'fixed' && parseInt(style.zIndex) > 1000) {
                 console.log('🗑️ Removendo elemento fixed de alto z-index');
                 el.remove();
             }
         });
         
-        // ===== FASE 2: Clique em Botões de Consentimento =====
+        // ===== FASE 3: Clique em Botões de Consentimento =====
         const btnKeywords = [
             'accept', 'agree', 'consent', 'allow', 'continue',
             'aceitar', 'concordo', 'permitir', 'continuar',
@@ -87,7 +90,7 @@ async def crawl_url(request: CrawlRequest):
                 console.log(`✅ Clicando botão: "${text}"`);
                 try {
                     btn.click();
-                    await sleep(2000);
+                    await sleep(2500);
                     break; // Clica apenas no primeiro encontrado
                 } catch(e) {
                     console.log('❌ Erro ao clicar:', e);
@@ -95,10 +98,13 @@ async def crawl_url(request: CrawlRequest):
             }
         }
         
-        // ===== FASE 3: Isolamento Cirúrgico do Artigo =====
-        await sleep(1000);
+        // ===== FASE 4: Isolamento Cirúrgico do Artigo =====
+        await sleep(1500);
         
-        // Seletores específicos por site + genéricos
+        // Primeiro tenta encontrar o conteúdo por texto longo
+        let article = null;
+        
+        // Estratégia 1: Seletores específicos
         const articleSelectors = [
             'article',
             '[role="main"]',
@@ -112,15 +118,40 @@ async def crawl_url(request: CrawlRequest):
             '.news-article',
             // MSN específico
             '.article-body',
-            '[data-t="article"]'
+            '[data-t="article"]',
+            '.content',
+            '#content'
         ];
         
-        let article = null;
         for (const sel of articleSelectors) {
             article = document.querySelector(sel);
-            if (article) {
-                console.log(`📰 Artigo encontrado com seletor: ${sel}`);
+            if (article && article.innerText.length > 300) {
+                console.log(`📰 Artigo encontrado com seletor: ${sel} (${article.innerText.length} chars)`);
                 break;
+            }
+            article = null; // Reset se não tiver conteúdo suficiente
+        }
+        
+        // Estratégia 2: Se não encontrou, procura pela div com mais texto
+        if (!article) {
+            console.log('📰 Buscando elemento com mais texto...');
+            const allDivs = Array.from(document.querySelectorAll('div, section'));
+            
+            let maxLength = 0;
+            let bestDiv = null;
+            
+            allDivs.forEach(div => {
+                const textLength = div.innerText.length;
+                // Ignora elementos muito pequenos ou que são containers do body inteiro
+                if (textLength > maxLength && textLength < document.body.innerText.length * 0.9) {
+                    maxLength = textLength;
+                    bestDiv = div;
+                }
+            });
+            
+            if (bestDiv && maxLength > 500) {
+                article = bestDiv;
+                console.log(`📰 Melhor elemento encontrado com ${maxLength} caracteres`);
             }
         }
         
@@ -130,17 +161,20 @@ async def crawl_url(request: CrawlRequest):
             
             // Remove elementos indesejados DENTRO do artigo
             const unwantedInside = content.querySelectorAll(
-                'script, style, iframe, [class*="ad"], [class*="promo"], ' +
-                '[class*="related"], [class*="comment"], nav, aside'
+                'script, style, iframe, [class*="ad"], [id*="ad"], ' +
+                '[class*="promo"], [class*="related"], [class*="comment"], ' +
+                'nav, aside, header, footer'
             );
             unwantedInside.forEach(el => el.remove());
+            
+            // Pega o título da página
+            const title = document.title;
             
             // Limpa TUDO do body
             document.body.innerHTML = '';
             
-            // Adiciona título da página se disponível
-            const title = document.title;
-            if (title) {
+            // Adiciona título se disponível
+            if (title && !content.querySelector('h1')) {
                 const h1 = document.createElement('h1');
                 h1.textContent = title;
                 document.body.appendChild(h1);
@@ -149,7 +183,7 @@ async def crawl_url(request: CrawlRequest):
             // Insere o artigo limpo
             document.body.appendChild(content);
             
-            console.log('✅ DOM isolado com sucesso!');
+            console.log(`✅ DOM isolado com sucesso! Conteúdo final: ${document.body.innerText.length} chars`);
         } else {
             console.log('⚠️ Artigo não encontrado. Tentando limpeza genérica...');
             
@@ -157,7 +191,8 @@ async def crawl_url(request: CrawlRequest):
             const genericUnwanted = [
                 'header', 'footer', 'nav', 'aside', 
                 '[role="navigation"]', '[role="banner"]',
-                '[role="complementary"]', '.sidebar', '.menu'
+                '[role="complementary"]', '.sidebar', '.menu',
+                '[class*="ad"]', '[id*="ad"]'
             ];
             
             genericUnwanted.forEach(sel => {
@@ -165,12 +200,13 @@ async def crawl_url(request: CrawlRequest):
             });
         }
         
-        // ===== FASE 4: Scroll Completo para Lazy Load =====
+        // ===== FASE 5: Scroll Completo para Lazy Load =====
         window.scrollTo(0, document.body.scrollHeight);
-        await sleep(1000);
+        await sleep(1500);
         window.scrollTo(0, 0);
+        await sleep(500);
         
-        console.log('🏁 PROTOCOLO CONCLUÍDO');
+        console.log(`🏁 PROTOCOLO CONCLUÍDO - Texto final: ${document.body.innerText.length} chars`);
     })();
     """
 
@@ -198,10 +234,10 @@ async def crawl_url(request: CrawlRequest):
         js_code=js_handler,
         virtual_scroll_config=scroll_config,
         
-        # Espera por article OU main content
-        wait_for="css:article, [role='main'], main",
+        # Espera genérica - só garante que a página carregou
+        wait_for="js:() => document.readyState === 'complete'",
         page_timeout=60000,  # 60s timeout
-        delay_before_return_html=4.0,  # Mais tempo para JS rodar
+        delay_before_return_html=5.0,  # Mais tempo para JS rodar completamente
         
         # Exclusões extras
         excluded_tags=['script', 'style', 'iframe', 'noscript'],
