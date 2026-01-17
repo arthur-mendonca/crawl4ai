@@ -11,28 +11,29 @@ class CrawlRequest(BaseModel):
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Filtro de conteúdo mais inteligente
-    # O PruningContentFilter remove menus e rodapés baseando-se na densidade de texto
+    # 1. Configuração do Filtro de Conteúdo
+    # O PruningContentFilter remove menus, rodapés e ruídos com base na densidade de texto
     content_filter = PruningContentFilter(
-        threshold=0.45,           # Aumentamos um pouco para ser mais rigoroso com menus
-        min_word_threshold=30,    # Parágrafos muito curtos (geralmente lixo) são ignorados
+        threshold=0.45,           # Sensibilidade para distinguir conteúdo de menus
+        min_word_threshold=30,    # Ignora blocos com poucas palavras
         threshold_type="dynamic"
     )
 
+    # 2. Configuração do Gerador de Markdown
     md_generator = DefaultMarkdownGenerator(
         content_filter=content_filter,
         options={
-            "ignore_links": False, 
+            "ignore_links": False,  # IMPORTANTE: Mantém o texto dos links íntegro
             "ignore_images": True,
             "body_width": 0,
-            "citations": True      # Habilita o modo de citações no gerador
+            "citations": True       # Move as URLs para o fim (Referências numeradas)
         }
     )
 
+    # 3. Configuração de Execução
+    # Removido o argumento 'main_content_only' que causou o erro
     config = CrawlerRunConfig(
-        markdown_generator=md_generator,
-        # Importante: Queremos que o crawler foque no conteúdo principal
-        main_content_only=True     # Tenta identificar o <main> ou <article> automaticamente
+        markdown_generator=md_generator
     )
 
     try:
@@ -42,11 +43,13 @@ async def crawl_url(request: CrawlRequest):
             if not result.success:
                 raise HTTPException(status_code=500, detail=result.error_message)
 
-            # O 'fit_markdown' agora conterá apenas o texto relevante 
-            # E como 'citations' está True, ele virá limpo com as referências no fim.
+            # ESTRATÉGIA DE RETORNO:
+            # O 'fit_markdown' contém apenas o texto principal (limpo pelo PruningFilter)
+            # Como 'citations' está True, ele virá no formato "texto [1]" com referências no fim.
             final_content = result.markdown.fit_markdown
 
-            # Backup caso o filtro seja agressivo demais
+            # Se o filtro for agressivo demais e o resultado for muito curto,
+            # retornamos a página inteira limpa (markdown_with_citations).
             if not final_content or len(final_content) < 300:
                 final_content = result.markdown.markdown_with_citations
 
