@@ -26,8 +26,7 @@ async def crawl_url(request: CrawlRequest):
             return {
                 "success": True,
                 "url": request.url,
-                "markdown": result.markdown,
-                "html": result.html # Opcional, se quiser o HTML puro
+                "markdown": result.markdown
             }
             
     except Exception as e:
