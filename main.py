@@ -3,21 +3,22 @@ from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 
-app = FastAPI(title="Crawl4AI Clean API")
+app = FastAPI(title="Crawl4AI Anti-Bot API")
 
 class CrawlRequest(BaseModel):
     url: str
 
 @app.post("/crawl")
 async def crawl_url(request: CrawlRequest):
-    # 1. Configuração Global do Navegador
-    # Definimos como o navegador será lançado.
+    # 1. Configuração do Navegador
+    # enable_stealth aplica patches de furtividade para burlar detecções básicas
     browser_config = BrowserConfig(
         headless=True,
-        user_agent_mode="random"  # Identidades randômicas para cada site
+        user_agent_mode="random",
+        enable_stealth=True  # Essencial para passar pelo Cloudflare
     )
 
-    # 2. Gerador de Markdown (Mantendo a limpeza de hyperlinks e citações)
+    # 2. Gerador de Markdown
     md_generator = DefaultMarkdownGenerator(
         options={
             "ignore_links": False,
@@ -27,13 +28,18 @@ async def crawl_url(request: CrawlRequest):
         }
     )
 
-    # 3. Configuração da Corrida (Onde o "Magic" acontece)
+    # 3. Configuração da Execução (Onde o Bypass acontece)
     run_config = CrawlerRunConfig(
         markdown_generator=md_generator,
-        magic=True,               # BYPASS: Ativa comportamento humano (Anti-bot)
-        # Espera o Cloudflare redirecionar após o sucesso
-        wait_until="networkidle",
-        delay_before_return_html=5.0,
+        magic=True,               # Tenta lidar automaticamente com desafios e popups
+        simulate_user=True,       # Simula movimentos de mouse e interações humanas
+        override_navigator=True,  # Mascara propriedades do navegador
+        
+        # MUDANÇA CRUCIAL: Voltamos para 'domcontentloaded' para evitar o Timeout de 60s
+        # e usamos um delay maior para dar tempo do Cloudflare redirecionar.
+        wait_until="domcontentloaded", 
+        delay_before_return_html=10.0, # 10 segundos é o tempo ideal para o bypass do Turnstile
+        
         excluded_tags=["nav", "footer", "header", "aside", "script", "style"],
         excluded_selector=".social-share, .sidebar, .menu, .ads"
     )
@@ -54,5 +60,4 @@ async def crawl_url(request: CrawlRequest):
             }
             
     except Exception as e:
-        # Se der erro de tipo ou qualquer outro, pegamos aqui
         raise HTTPException(status_code=500, detail=str(e))
