@@ -3,95 +3,14 @@ from pydantic import BaseModel
 from crawl4ai import AsyncWebCrawler, CrawlerRunConfig, BrowserConfig, CacheMode
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.async_configs import VirtualScrollConfig
+from msn_api import extract_msn_article_id, fetch_msn_api, msn_json_to_markdown
 import re
-import json
-import httpx
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup
 
 app = FastAPI(title="Crawl4AI v4 - MSN API + Anti-Bot")
 
 class CrawlRequest(BaseModel):
     url: str
     min_words: int = 100
-
-def extract_msn_article_id(url: str) -> str | None:
-    """Extrai o ID do artigo de URLs do MSN (ex: AA1UiYJv)"""
-    # Padrão: /ar-AA1UiYJv ou /ar-AA1UiYJv?parametros
-    match = re.search(r'/ar-([A-Za-z0-9]+)', url)
-    if match:
-        article_id = match.group(1)
-        # Remove query params se estiverem grudados
-        article_id = article_id.split('?')[0]
-        return article_id
-    return None
-
-async def fetch_msn_api(article_id: str) -> dict | None:
-    """Busca conteúdo direto da API do MSN"""
-    # Detecta idioma da URL (padrão en-us)
-    locale = "en-us"  # Pode ser extraído da URL original se necessário
-    
-    api_url = f"https://assets.msn.com/content/view/v2/Detail/{locale}/{article_id}"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://www.msn.com/"
-    }
-    
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(api_url, headers=headers)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"❌ MSN API retornou {response.status_code}")
-                return None
-    except Exception as e:
-        print(f"❌ Erro ao buscar MSN API: {e}")
-        return None
-
-def msn_json_to_markdown(data: dict) -> str:
-    """Converte JSON da API do MSN para markdown"""
-    parts = []
-    
-    # Título
-    if 'title' in data:
-        parts.append(f"# {data['title']}\n")
-    
-    # Autores
-    if 'authors' in data and data['authors']:
-        authors = ', '.join(a.get('name', '') for a in data['authors'])
-        parts.append(f"**Por:** {authors}\n")
-    
-    # Abstract/resumo
-    if 'abstract' in data:
-        parts.append(f"*{data['abstract']}*\n")
-    
-    # Corpo do artigo (HTML)
-    if 'body' in data:
-        # Remove tags HTML e converte para texto limpo
-        soup = BeautifulSoup(data['body'], 'html.parser')
-        
-        # Remove scripts, styles, etc
-        for tag in soup(['script', 'style', 'iframe', 'noscript']):
-            tag.decompose()
-        
-        # Extrai texto
-        text = soup.get_text(separator='\n', strip=True)
-        
-        # Limpa linhas vazias excessivas
-        text = re.sub(r'\n{3,}', '\n\n', text)
-        
-        parts.append(text)
-    
-    # Fonte original
-    if 'sourceHref' in data:
-        parts.append(f"\n---\n**Fonte:** [{data['sourceHref']}]({data['sourceHref']})")
-    
-    return '\n\n'.join(parts)
 
 def extract_article_by_density(markdown: str, title: str = "") -> str:
     """Extrai artigo por densidade de texto (fallback)"""
@@ -100,66 +19,90 @@ def extract_article_by_density(markdown: str, title: str = "") -> str:
     
     scored_blocks = []
     for block in blocks:
-        words = block.split()
+        # 1. Limpeza preliminar para pontuação precisa
+        # Remove URLs e converte links markdown para texto puro para contar palavras reais
+        clean_text = re.sub(r'https?://\S+', '', block)
+        clean_text = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', clean_text)
+        clean_text = clean_text.replace('()', '').replace('[]', '').replace('[ ]', '')
+        
+        words = clean_text.split()
         word_count = len(words)
         
-        if word_count < 10:
+        # Ignora blocos vazios ou muito curtos após limpeza
+        if word_count < 5:
             continue
-        
+            
+        # 2. Pontuação Base
         score = min(word_count, 500)
         
-        # Penaliza listas de links (navegação/menu)
-        if block.count('[') > 5 or block.count('http') > 3:
-            score -= 100
+        # 3. Análise de Links (no bloco original)
+        link_count = block.count('[') + block.count('http')
         
-        # Penaliza linhas curtas repetitivas (menu)
+        # Se tiver links, verifica a densidade em relação ao texto limpo
+        if link_count > 0:
+            # Densidade = links / palavras reais
+            link_density = link_count / max(word_count, 1)
+            
+            # Penaliza apenas se for MUITO denso (menu/lista de links)
+            # Aumentado para 0.5 (50%) para não pegar artigos com muitas citações
+            if link_density > 0.5:
+                score -= 500  # Penalidade forte, mas não fatal imediata
+            elif link_density > 0.3:
+                score -= 100
+        
+        block_lower = block.lower()
+        
+        # 4. Penalidades Estruturais
+        # Penaliza linhas curtas repetitivas (menu vertical)
         lines = block.split('\n')
-        if len(lines) > 5 and sum(len(l) < 50 for l in lines) > len(lines) * 0.7:
-            score -= 100
-        
-        # Penaliza blocos que são só títulos/headers
-        if block.count('###') > 3 or block.count('##') > 2:
-            score -= 80
-        
+        short_lines = sum(1 for l in lines if len(l.strip()) < 50)
+        if len(lines) > 3 and short_lines > len(lines) * 0.6:
+            score -= 200
+            
         # Penaliza palavras-chave de navegação
         nav_words = ['menu', 'toggle', 'submit', 'search', 'topics', 'more from',
-                     'newsletter', 'podcast', 'video', 'contact us', 'staff',
-                     'events', 'login', 'sign up', 'subscribe']
-        if sum(1 for w in nav_words if w in block.lower()) >= 2:
-            score -= 120
+                     'newsletter', 'podcast', 'contact us', 'sign up', 'subscribe', 
+                     'related stories', 'read more', 'latest news', 'site map']
         
-        # Penaliza banners
-        banner_words = ['privacy', 'cookie', 'consent', 'partners', 'vendors', 
-                       'preferences', 'advertising', 'manage', 'accept', 'reject',
-                       'cloudflare', 'checking your browser', 'enable javascript']
-        if sum(1 for w in banner_words if w in block.lower()) >= 3:
-            score -= 150
+        if any(w in block_lower for w in nav_words):
+             score -= 100
+            
+        # Penaliza rodapés e banners
+        footer_words = ['all rights reserved', 'copyright', 'privacy policy', 'terms of use', 
+                       'cookie', 'consent', 'advertising']
+        if any(w in block_lower for w in footer_words):
+             score -= 200
         
-        # Bônus para parágrafos de artigo
-        score += min(block.count('.') + block.count('!') + block.count('?'), 20)
+        # 5. Bônus
+        # Pontuação de frase (indica texto corrido)
+        score += min(clean_text.count('.') + clean_text.count('!') + clean_text.count('?'), 50)
         
-        if block.strip().endswith('.'):
-            score += 30
-        
-        # Bônus para blocos mais longos (parágrafos completos)
-        if word_count > 50:
-            score += 20
-        
-        scored_blocks.append((score, block, word_count))
+        # Parágrafos longos (conteúdo real)
+        if word_count > 40:
+            score += 100 # Aumentei o bônus
+            
+        scored_blocks.append((score, clean_text, word_count))
     
-    # Filtra apenas blocos com score positivo
+    # Filtra blocos com score muito baixo
     scored_blocks = [b for b in scored_blocks if b[0] > 0]
-    scored_blocks.sort(reverse=True, key=lambda x: x[0])
     
-    result_blocks = []
-    total_words = 0
-    
-    for score, block, word_count in scored_blocks:
-        if total_words < 2000:
-            result_blocks.append(block)
-            total_words += word_count
-    
-    result = '\n\n'.join(result_blocks)
+    if scored_blocks:
+        # Seleção baseada na mediana para evitar outliers
+        sorted_scores = sorted([s[0] for s in scored_blocks])
+        median_score = sorted_scores[len(sorted_scores)//2]
+        
+        # Threshold conservador: 20% da mediana
+        # Isso garante que parágrafos normais passem, mas lixo puro (score negativo/zero) fique de fora
+        threshold = max(median_score * 0.2, 10)
+        
+        final_blocks = []
+        for score, text, _ in scored_blocks:
+             if score >= threshold:
+                 final_blocks.append(text.strip())
+                 
+        result = '\n\n'.join(final_blocks)
+    else:
+        result = ""
     
     if title and not result.startswith('#'):
         result = f"# {title}\n\n{result}"
@@ -337,6 +280,12 @@ async def crawl_url(request: CrawlRequest):
                 
                 if good_paragraphs:
                     cleaned_md = '\n\n'.join(good_paragraphs[:10])
+                    
+                    # Aplica limpeza de links também no fallback
+                    cleaned_md = re.sub(r'https?://\S+', '', cleaned_md)
+                    cleaned_md = re.sub(r'<https?://[^>]+>', '', cleaned_md)
+                    cleaned_md = cleaned_md.replace('()', '')
+                    
                     if title:
                         cleaned_md = f"# {title}\n\n{cleaned_md}"
                     word_count = len(cleaned_md.split())
