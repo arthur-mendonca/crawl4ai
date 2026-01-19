@@ -2,7 +2,6 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
-
 def extract_msn_article_id(url: str) -> str | None:
     match = re.search(r"/ar-([A-Za-z0-9]+)", url)
     if match:
@@ -65,4 +64,3 @@ def msn_json_to_markdown(data: dict) -> str:
         parts.append(f"\n---\n**Fonte:** [{data['sourceHref']}]({data['sourceHref']})")
 
     return "\n\n".join(parts)
-
