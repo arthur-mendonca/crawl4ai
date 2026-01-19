@@ -36,6 +36,9 @@ RUN useradd -m appuser && \
 # 5. Copia o restante do seu código definindo o dono como appuser
 COPY --chown=appuser:appuser . .
 
+# Instala as dependências do projeto (definidas no pyproject.toml)
+RUN pip install .
+
 # Agora sim, mudamos para o usuário não-root para rodar a aplicação
 USER appuser
 
@@ -43,4 +46,4 @@ USER appuser
 EXPOSE 8000
 
 # Comando para iniciar sua API
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

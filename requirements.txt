@@ -3,4 +3,5 @@ uvicorn
 pydantic
 httpx
 beautifulsoup4
+playwright>=1.49.0
 # crawl4ai is assumed to be installed or present locally
