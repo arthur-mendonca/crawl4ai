@@ -3,7 +3,6 @@ from app.api.models import CrawlRequest
 from app.core.crawler import get_page_content
 from app.core.extraction import extract_article_by_density, extract_paragraphs_fallback
 from app.services.msn import extract_msn_article_id, fetch_msn_api, msn_json_to_markdown
-import re
 
 router = APIRouter()
 
@@ -56,15 +55,18 @@ async def crawl_url(request: CrawlRequest):
             )
 
         raw_md = result.markdown.raw_markdown
+        # Imprime o início do markdown para debug visual, com flush=True
+        print(f"DEBUG: Crawl normal - Markdown bruto (início): {raw_md[:500]}...", flush=True)
+        print(f"DEBUG: Crawl normal - Total chars: {len(raw_md)}", flush=True)
         
         title = ""
         if result.metadata and 'title' in result.metadata:
             title = result.metadata['title']
         
-        print(f"\n{'='*60}")
-        print(f"URL: {url}")
-        print(f"Markdown bruto: {len(raw_md)} chars")
-        print(f"Título: {title}")
+        print(f"\n{'='*60}", flush=True)
+        print(f"URL: {url}", flush=True)
+        print(f"Markdown bruto: {len(raw_md)} chars", flush=True)
+        print(f"Título: {title}", flush=True)
         
         # Detecta página de challenge
         if any(kw in raw_md.lower() for kw in 

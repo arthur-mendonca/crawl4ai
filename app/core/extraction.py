@@ -2,6 +2,7 @@ import re
 
 def extract_article_by_density(markdown: str, title: str = "") -> str:
     """Extrai artigo por densidade de texto (fallback)"""
+    print(f"DEBUG: extract_article_by_density - title: {title}", flush=True)
     markdown = re.sub(r'\n{3,}', '\n\n', markdown)
     blocks = [b.strip() for b in markdown.split('\n\n') if b.strip()]
     
